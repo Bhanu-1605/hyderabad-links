@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+/* Brand colours. Change these four values to re-theme the whole site. */
+@theme {
+  --color-brand-50: #f0fdfa;
+  --color-brand-100: #ccfbf1;
+  --color-brand-700: #0f766e;
+  --color-brand-900: #134e4a;
+}

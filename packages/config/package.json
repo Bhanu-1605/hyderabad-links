@@ -1,0 +1,7 @@
+{
+  "name": "@hl/config",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Shared TypeScript configuration for all HYDERABAD LINKS apps.",
+  "files": ["tsconfig.base.json"]
+}

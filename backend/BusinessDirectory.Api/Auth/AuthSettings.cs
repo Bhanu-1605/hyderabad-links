@@ -1,0 +1,69 @@
+using System.Security.Cryptography;
+
+namespace BusinessDirectory.Api.Auth;
+
+/// <summary>
+/// Owner-login settings. Secrets come from configuration (Key Vault / environment variables in Azure), never from source code.
+/// In Development, missing keys are replaced by random ones generated at startup (sessions then end on every restart).
+/// Outside Development, missing or weak keys stop the app from starting.
+/// </summary>
+public sealed class AuthSettings
+{
+    public const string OwnerAudience = "owner";
+
+    public required byte[] JwtKey { get; init; }
+    public required byte[] OtpKey { get; init; }
+    public string Issuer { get; init; } = "hyderabadlinks-api";
+    public string Audience { get; init; } = OwnerAudience;
+    public int AccessTokenMinutes { get; init; } = 15;
+    public int RefreshTokenDays { get; init; } = 30;
+    public int OtpTtlSeconds { get; init; } = 300;
+    public int ResendCooldownSeconds { get; init; } = 30;
+    public int MaxOtpPerPhonePerHour { get; init; } = 5;
+    public int MaxOtpPerIpPerHour { get; init; } = 20;
+
+    public static AuthSettings Load(IConfiguration configuration, bool isDevelopment)
+    {
+        var section = configuration.GetSection("Auth");
+        return new AuthSettings
+        {
+            JwtKey = ReadKey(section["JwtSigningKey"], "Auth:JwtSigningKey", isDevelopment),
+            OtpKey = ReadKey(section["OtpHmacKey"], "Auth:OtpHmacKey", isDevelopment),
+            Issuer = section["Issuer"] ?? "hyderabadlinks-api",
+            AccessTokenMinutes = section.GetValue("AccessTokenMinutes", 15),
+            RefreshTokenDays = section.GetValue("RefreshTokenDays", 30),
+            OtpTtlSeconds = section.GetValue("OtpTtlSeconds", 300),
+            ResendCooldownSeconds = section.GetValue("ResendCooldownSeconds", 30),
+            MaxOtpPerPhonePerHour = section.GetValue("MaxOtpPerPhonePerHour", 5),
+            MaxOtpPerIpPerHour = section.GetValue("MaxOtpPerIpPerHour", 20),
+        };
+    }
+
+    private static byte[] ReadKey(string? base64, string name, bool isDevelopment)
+    {
+        if (string.IsNullOrWhiteSpace(base64))
+        {
+            if (isDevelopment)
+            {
+                return RandomNumberGenerator.GetBytes(32);
+            }
+            throw new InvalidOperationException($"{name} must be set (base64, at least 32 bytes) outside Development.");
+        }
+
+        byte[] key;
+        try
+        {
+            key = Convert.FromBase64String(base64);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidOperationException($"{name} must be a base64 string.");
+        }
+
+        if (key.Length < 32)
+        {
+            throw new InvalidOperationException($"{name} must decode to at least 32 bytes.");
+        }
+        return key;
+    }
+}

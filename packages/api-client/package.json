@@ -1,0 +1,6 @@
+{
+  "name": "@hl/api-client",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Generated TypeScript client for the HYDERABAD LINKS API. Placeholder until the first real endpoints exist (Phase 2)."
+}

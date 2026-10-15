@@ -1,0 +1,21 @@
+{
+  "name": "hyderabad-links",
+  "private": true,
+  "version": "0.0.0",
+  "description": "HYDERABAD LINKS monorepo: three Next.js websites, one ASP.NET Core API, one PostgreSQL database.",
+  "workspaces": ["apps/*", "packages/*"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev:main": "npm run dev -w apps/main-website",
+    "dev:admin": "npm run dev -w apps/admin-website",
+    "dev:super-admin": "npm run dev -w apps/super-admin-website",
+    "db:migrate": "dotnet run --project backend/BusinessDirectory.Api -- migrate",
+    "db:seed-dev": "dotnet run --project backend/BusinessDirectory.Api -- seed-dev",
+    "dev:api": "dotnet run --project backend/BusinessDirectory.Api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "check:migrations": "node scripts/check-migrations.mjs",
+    "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
+    "verify": "npm run check:migrations && npm run test:scripts && npm run typecheck && npm run build && dotnet build backend/BusinessDirectory.sln && dotnet test backend/BusinessDirectory.sln"
+  }
+}

@@ -1,0 +1,148 @@
+import { redirect } from "next/navigation";
+import { readTokens } from "./session";
+import type { SessionTokens } from "./session-cookies";
+
+// Server-side only. The browser never calls the API: server components and server actions do,
+// attaching the owner's token from the httpOnly cookie.
+const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:5080";
+
+export type OwnerListing = {
+  id: number;
+  slug: string;
+  name: string;
+  description: string | null;
+  addressLine: string | null;
+  pincode: string | null;
+  phonePrimary: string;
+  phoneWhatsapp: string | null;
+  websiteUrl: string | null;
+  latitude: number;
+  longitude: number;
+  citySlug: string;
+  localitySlug: string;
+  localityName: string;
+  categorySlug: string;
+  categoryName: string;
+  status: string;
+  url: string;
+};
+
+export type OwnerProfile = { id: number; phone: string; name: string | null };
+
+/** What the listing form sends. The API trims and validates everything again. */
+export type ListingFormInput = {
+  name: string;
+  description: string;
+  categorySlug: string;
+  localitySlug?: string;
+  addressLine: string;
+  pincode: string;
+  phonePrimary: string;
+  phoneWhatsapp: string;
+  websiteUrl: string;
+};
+
+export type ApiFailure = { ok: false; status: number; message: string; fieldErrors: Record<string, string> };
+export type ApiResult<T> = { ok: true; data: T } | ApiFailure;
+
+async function toFailure(response: Response): Promise<ApiFailure> {
+  let message = "Something went wrong. Please try again.";
+  const fieldErrors: Record<string, string> = {};
+  try {
+    const body = (await response.json()) as { detail?: unknown; errors?: Record<string, unknown> };
+    if (body.errors && typeof body.errors === "object") {
+      for (const [field, messages] of Object.entries(body.errors)) {
+        if (Array.isArray(messages) && typeof messages[0] === "string") fieldErrors[field] = messages[0];
+      }
+      message = "Please fix the fields marked below.";
+    } else if (typeof body.detail === "string") {
+      message = body.detail;
+    }
+  } catch {
+    // Not JSON: keep the generic message.
+  }
+  return { ok: false, status: response.status, message, fieldErrors };
+}
+
+async function send<T>(path: string, init: RequestInit, accessToken?: string): Promise<ApiResult<T>> {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  if (init.body) headers.set("Content-Type", "application/json");
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers, cache: "no-store" });
+  } catch {
+    return { ok: false, status: 0, message: "We could not reach the server. Please try again in a moment.", fieldErrors: {} };
+  }
+  if (!response.ok) return toFailure(response);
+  if (response.status === 204) return { ok: true, data: undefined as T };
+  return { ok: true, data: (await response.json()) as T };
+}
+
+/** Calls an owner endpoint with the signed-in owner's token. No token or a rejected token sends the person to sign in again. */
+async function authed<T>(path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
+  const { access } = await readTokens();
+  if (!access) redirect("/login/reset");
+  const result = await send<T>(path, init, access);
+  if (!result.ok && result.status === 401) redirect("/login/reset");
+  return result;
+}
+
+const json = (value: unknown): string => JSON.stringify(value);
+const orNull = (value: string | undefined) => (value && value.trim() !== "" ? value.trim() : null);
+
+function toPayload(input: ListingFormInput) {
+  return {
+    name: orNull(input.name),
+    description: orNull(input.description),
+    categorySlug: orNull(input.categorySlug),
+    localitySlug: orNull(input.localitySlug),
+    addressLine: orNull(input.addressLine),
+    pincode: orNull(input.pincode),
+    phonePrimary: orNull(input.phonePrimary),
+    phoneWhatsapp: orNull(input.phoneWhatsapp),
+    websiteUrl: orNull(input.websiteUrl),
+  };
+}
+
+// ---- sign in (no token needed)
+export const requestOtp = (phone: string) =>
+  send<{ expiresInSeconds: number; resendAfterSeconds: number }>("/api/v1/auth/owner/otp/request", {
+    method: "POST",
+    body: json({ phone }),
+  });
+
+export const verifyOtp = (phone: string, code: string) =>
+  send<SessionTokens>("/api/v1/auth/owner/otp/verify", { method: "POST", body: json({ phone, code }) });
+
+export const logoutSession = (refreshToken: string) =>
+  send<void>("/api/v1/auth/owner/logout", { method: "POST", body: json({ refreshToken }) });
+
+// ---- signed-in owner
+export const getMe = () => authed<OwnerProfile>("/api/v1/me");
+export const listMyListings = () => authed<OwnerListing[]>("/api/v1/me/listings");
+export const getMyListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}`);
+export const createListing = (input: ListingFormInput) =>
+  authed<OwnerListing>("/api/v1/me/listings", { method: "POST", body: json(toPayload(input)) });
+export const updateListing = (id: number, input: ListingFormInput) =>
+  authed<OwnerListing>(`/api/v1/me/listings/${id}`, { method: "PUT", body: json(toPayload({ ...input, localitySlug: undefined })) });
+export const submitListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}/submit`, { method: "POST" });
+
+/** Plain-language status for the owner. */
+export function describeStatus(status: string): { label: string; tone: "grey" | "amber" | "green" | "red"; help: string } {
+  switch (status) {
+    case "draft":
+      return { label: "Draft", tone: "grey", help: "Only you can see this. Add the address and a description, then submit it for review." };
+    case "pending_review":
+      return { label: "In review", tone: "amber", help: "We are checking your listing. It will appear on the site once approved." };
+    case "active":
+      return { label: "Live", tone: "green", help: "Visible to everyone on the site." };
+    case "rejected":
+      return { label: "Needs changes", tone: "red", help: "Update your listing and submit it again." };
+    case "suspended":
+      return { label: "Suspended", tone: "red", help: "This listing is hidden. Please contact support." };
+    default:
+      return { label: status, tone: "grey", help: "" };
+  }
+}

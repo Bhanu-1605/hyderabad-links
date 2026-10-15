@@ -1,0 +1,32 @@
+# dependencies and build output
+node_modules/
+.next/
+out/
+dist/
+bin/
+obj/
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets and local config: NEVER commit these
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+*.pfx
+*.pem
+*.key
+
+# editor / OS
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# test output
+TestResults/
+playwright-report/
+test-results/
+coverage/

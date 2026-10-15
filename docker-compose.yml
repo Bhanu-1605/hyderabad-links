@@ -1,0 +1,33 @@
+# Local development services only. Production uses Azure managed services.
+services:
+  postgres:
+    image: postgis/postgis:17-3.5   # match the PostgreSQL major version you provision on Azure
+    container_name: hl-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hyderabad_links}
+      POSTGRES_USER: ${POSTGRES_USER:-hl_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hl_dev_password_change_me}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"   # bound to localhost only
+    volumes:
+      - hl_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite   # local emulator for Azure Blob Storage
+    container_name: hl-azurite
+    restart: unless-stopped
+    command: azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+    ports:
+      - "127.0.0.1:10000:10000"
+    volumes:
+      - hl_azurite:/data
+
+volumes:
+  hl_pgdata:
+  hl_azurite:
