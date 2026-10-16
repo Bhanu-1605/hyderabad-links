@@ -226,6 +226,51 @@ BEGIN
   FROM listings WHERE slug = 'smoke-mod-draft' AND status = 'pending_review';
   IF n <> 0 THEN RAISE EXCEPTION 'FAIL: a draft listing appeared in the review queue'; END IF;
 
+  -- 18. A listing an admin adds by hand is marked source = 'admin', has no owner account behind it,
+  --     and is published straight away (what the API writes when the admin may also review).
+  INSERT INTO listings (business_id, locality_id, slug, name, description, address_line, location,
+                        phone_primary, status, source, created_by_user_id, published_at)
+  SELECT b.id, lo.id, 'smoke-mod-by-admin', 'Smoke Mod Walk-In Electricals',
+         'Added from a phone call.', 'Shop 3, Madhapur', lo.center, '+919999900064',
+         'active', 'admin', NULL, now()
+  FROM businesses b, localities lo
+  WHERE b.name = 'Smoke Moderation Business' AND lo.slug = 'madhapur';
+
+  SELECT count(*) INTO n
+  FROM listings
+  WHERE slug = 'smoke-mod-by-admin' AND source = 'admin' AND created_by_user_id IS NULL
+    AND status = 'active' AND published_at IS NOT NULL;
+  IF n <> 1 THEN RAISE EXCEPTION 'FAIL: the hand-added listing was not stored as an admin listing'; END IF;
+
+  -- 19. `source` only accepts the three values the application uses.
+  BEGIN
+    UPDATE listings SET source = 'somewhere_else' WHERE slug = 'smoke-mod-by-admin';
+    RAISE EXCEPTION 'FAIL: an unknown listing source was accepted';
+  EXCEPTION WHEN check_violation THEN
+    NULL;   -- expected
+  END;
+
+  -- 20. An admin editing a listing changes its details, never its status: editing must not publish.
+  UPDATE listings SET status = 'pending_review', published_at = NULL WHERE slug = 'smoke-mod-by-admin';
+  UPDATE listings
+  SET name = 'Smoke Mod Walk-In Electricals and Repairs', phone_primary = '+919999900065', updated_at = now()
+  WHERE slug = 'smoke-mod-by-admin';
+
+  SELECT status INTO row_status FROM listings WHERE slug = 'smoke-mod-by-admin';
+  IF row_status <> 'pending_review' THEN
+    RAISE EXCEPTION 'FAIL: editing changed the status to %', row_status;
+  END IF;
+
+  -- 21. Submitting a corrected listing again clears the old rejection reason, so the owner is not
+  --     shown advice about a version they have already fixed.
+  UPDATE listings SET status = 'rejected', review_note = 'Old reason.' WHERE slug = 'smoke-mod-by-admin';
+  UPDATE listings SET status = 'pending_review', review_note = NULL, updated_at = now()
+  WHERE slug = 'smoke-mod-by-admin' AND status IN ('draft', 'rejected');
+
+  SELECT count(*) INTO n
+  FROM listings WHERE slug = 'smoke-mod-by-admin' AND status = 'pending_review' AND review_note IS NULL;
+  IF n <> 1 THEN RAISE EXCEPTION 'FAIL: resubmitting kept the old rejection reason'; END IF;
+
   RAISE NOTICE 'ok: admin moderation rules behaved as expected';
 END $$;
 

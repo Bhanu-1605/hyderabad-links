@@ -38,11 +38,13 @@ public class AdminModerationAccessTests(WebApplicationFactory<Program> factory) 
     [InlineData("GET", "/api/v1/admin/listings")]
     [InlineData("GET", "/api/v1/admin/listings?status=active")]
     [InlineData("GET", "/api/v1/admin/listings/1")]
+    [InlineData("POST", "/api/v1/admin/listings")]
+    [InlineData("PUT", "/api/v1/admin/listings/1")]
     [InlineData("POST", "/api/v1/admin/listings/1/approve")]
     [InlineData("POST", "/api/v1/admin/listings/1/reject")]
     public async Task Every_admin_route_refuses_an_anonymous_caller(string method, string path)
     {
-        var response = await Send(new HttpMethod(method), path);
+        var response = await Send(new HttpMethod(method), path, body: new { name = "X" });
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -61,13 +63,15 @@ public class AdminModerationAccessTests(WebApplicationFactory<Program> factory) 
     [InlineData("GET", "/api/v1/admin/me")]
     [InlineData("GET", "/api/v1/admin/listings")]
     [InlineData("GET", "/api/v1/admin/listings/1")]
+    [InlineData("POST", "/api/v1/admin/listings")]
+    [InlineData("PUT", "/api/v1/admin/listings/1")]
     [InlineData("POST", "/api/v1/admin/listings/1/approve")]
     [InlineData("POST", "/api/v1/admin/listings/1/reject")]
     public async Task A_valid_owner_token_is_refused_on_every_admin_route(string method, string path)
     {
         // The token is real and correctly signed; only its audience is wrong. Nothing reaches the
-        // handler, so an owner can never moderate even if they hold a perfectly good session.
-        var response = await Send(new HttpMethod(method), path, OwnerToken());
+        // handler, so an owner can never moderate — or add a listing as an admin — with their session.
+        var response = await Send(new HttpMethod(method), path, OwnerToken(), new { name = "X" });
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }

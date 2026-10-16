@@ -2,13 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
-import { PERMISSION_REVIEW, formatWhen, getAdminProfile, getListing } from "@/lib/admin-api";
+import { PERMISSION_EDIT, PERMISSION_REVIEW, formatWhen, getAdminProfile, getListing } from "@/lib/admin-api";
 import { DecisionForm } from "./DecisionForm";
 
 export const metadata: Metadata = { title: "Review listing" };
 export const dynamic = "force-dynamic";
 
-type Props = { params: Promise<{ id: string }> };
+type Props = { params: Promise<{ id: string }>; searchParams: Promise<{ added?: string }> };
 
 /** One labelled fact about the listing. */
 function Field({ label, value }: { label: string; value: string | null }) {
@@ -20,8 +20,9 @@ function Field({ label, value }: { label: string; value: string | null }) {
   );
 }
 
-export default async function ReviewListingPage({ params }: Props) {
+export default async function ReviewListingPage({ params, searchParams }: Props) {
   const { id: rawId } = await params;
+  const { added } = await searchParams;
   const id = Number.parseInt(rawId, 10);
   if (!Number.isSafeInteger(id) || id < 1) notFound();
 
@@ -43,6 +44,7 @@ export default async function ReviewListingPage({ params }: Props) {
   const mapsLink = `https://www.google.com/maps?q=${listing.latitude},${listing.longitude}`;
   // The API enforces this; the page only avoids showing a form that would be refused.
   const mayReview = me.ok && me.data.permissions.includes(PERMISSION_REVIEW);
+  const mayEdit = me.ok && me.data.permissions.includes(PERMISSION_EDIT);
 
   return (
     <main className="mx-auto max-w-3xl px-4 pt-8 pb-12">
@@ -57,8 +59,26 @@ export default async function ReviewListingPage({ params }: Props) {
             {listing.categoryName ?? "No category"} &middot; {listing.localityName}
           </p>
         </div>
-        <StatusBadge status={listing.status} />
+        <div className="flex items-center gap-3">
+          {mayEdit ? (
+            <Link
+              href={`/listings/${listing.id}/edit`}
+              className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium hover:bg-neutral-50"
+            >
+              Edit
+            </Link>
+          ) : null}
+          <StatusBadge status={listing.status} />
+        </div>
       </div>
+
+      {added ? (
+        <p role="status" className="mt-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-900">
+          {listing.status === "active"
+            ? "Listing added and published. It is on the public site now."
+            : "Listing added. It is in the review queue, waiting for someone who can publish it."}
+        </p>
+      ) : null}
 
       {listing.reviewNote ? (
         <p className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">

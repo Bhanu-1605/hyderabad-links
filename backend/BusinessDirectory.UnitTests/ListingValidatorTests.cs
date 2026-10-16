@@ -135,4 +135,32 @@ public class ListingValidatorTests
         Assert.Contains("latitude", outside.Errors.Keys);
         Assert.Contains("latitude", half.Errors.Keys);
     }
+
+    // An admin adding a listing on someone's behalf has no owner number to fall back on.
+    [Fact]
+    public void Without_a_fallback_number_the_phone_must_be_given()
+    {
+        var missing = ListingValidator.Validate(Valid(), requireLocality: true, fallbackPhone: null);
+
+        Assert.Null(missing.Value);
+        Assert.Contains("phonePrimary", missing.Errors.Keys);
+    }
+
+    [Fact]
+    public void Without_a_fallback_number_a_typed_phone_is_enough()
+    {
+        var typed = ListingValidator.Validate(Valid(i => i with { PhonePrimary = "98765 43212" }), requireLocality: true, fallbackPhone: null);
+
+        Assert.NotNull(typed.Value);
+        Assert.Equal("+919876543212", typed.Value.PhonePrimary);
+    }
+
+    [Fact]
+    public void A_typed_phone_still_wins_over_the_owners_number()
+    {
+        var typed = ListingValidator.Validate(Valid(i => i with { PhonePrimary = "98765 43212" }), true, OwnerPhone);
+
+        Assert.NotNull(typed.Value);
+        Assert.Equal("+919876543212", typed.Value.PhonePrimary);
+    }
 }

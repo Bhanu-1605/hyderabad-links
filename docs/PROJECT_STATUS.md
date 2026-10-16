@@ -23,12 +23,14 @@ All run locally and observed, not assumed:
 | Check | Result |
 |---|---|
 | `npm run verify` (migration check, script tests, typecheck, 3 production builds, .NET build + tests) | **passed** |
-| .NET unit tests | **166 passed**, 0 failed |
-| .NET integration tests | **54 passed**, 0 failed |
+| .NET unit tests | **169 passed**, 0 failed |
+| .NET integration tests | **58 passed**, 0 failed |
 | `database/checks/search_smoke.sql` | **passed** (10 assertions, rolls back) |
-| `database/checks/admin_moderation_smoke.sql` | **passed** (17 assertions, rolls back) |
+| `database/checks/admin_moderation_smoke.sql` | **passed** (21 assertions, rolls back) |
 | Search in a real browser against the seeded database | **works** — see below |
-| Admin moderation in a real browser against the seeded database | **works** — signed in, rejected a listing with a reason, approved it, and watched it appear in public search |
+| The whole workflow in a real browser against the seeded database | **works** — owner signed in by OTP and submitted a listing, it appeared in the pending queue, an admin approved it and the public page went from "not found" to live within seconds; a second listing was rejected with a reason, stayed unpublished, and the owner saw the reason on their listings screen |
+| Admin-added and admin-edited listings against the running API | **works** — a hand-added listing is stored as `source = admin` with no owner and goes live at once; editing changed the details and left the status alone; both wrote audit rows |
+| Permission separation against the running API | **works** — an admin holding only `listings.view` + `listings.create` got `403` on approve, reject and edit, and their new listing went to the review queue instead of going live |
 
 The moderation walk-through was done against a temporary listing that was deleted afterwards, so the
 dev data is unchanged. A local admin account `dev.admin@hyderabadlinks.local` (role `admin`) exists in
@@ -50,7 +52,10 @@ the local database only; reset its password with the `create-admin` command when
   listings are marked `noindex` so the site does not publish thin pages.
 - Listing detail pages with the correct record, structured data and canonical URLs.
 - Owner screens: phone-OTP sign-in (`/login`), then `/account/listings` to create, edit and submit
-  listings for review.
+  listings for review. A rejected listing shows the reviewer's reason, so the owner knows what to
+  change; submitting again clears it.
+- `/api/revalidate`: lets the admin site refresh a public page the moment a listing is approved,
+  instead of waiting out the 60-second cache window. Off unless `REVALIDATE_TOKEN` is configured.
 
 **API (`backend/BusinessDirectory.Api`)**
 - `/health/live`, `/health/ready`, `/api/v1/public/meta`.
@@ -69,6 +74,9 @@ the local database only; reset its password with the `create-admin` command when
 - `/listings/{id}`: everything a reviewer needs (contact details, map point, who submitted it, the
   last decision) plus Approve and Reject with a reason the owner will read. Approving publishes the
   listing immediately; rejecting sends it back to the owner, who can edit and resubmit.
+- `/listings/new` and `/listings/{id}/edit`: adding a business that phoned in, and correcting a
+  listing on an owner's behalf. Both use the same form as the owner's screens, and both only appear
+  for an admin who holds the matching permission — which the API checks again regardless.
 - The session lives in httpOnly cookies on the admin site's own origin, and `proxy.ts` swaps an
   expired access token for a fresh pair — the same scheme as the public site.
 
@@ -76,8 +84,13 @@ the local database only; reset its password with the `create-admin` command when
 - Admin auth: `POST /api/v1/auth/admin/login|refresh|logout`. PBKDF2-SHA256 passwords, lockout after
   5 wrong attempts for 15 minutes, one generic failure message, and a rotating refresh token whose
   reuse revokes the whole family.
-- Moderation: `GET /api/v1/admin/me`, `GET /listings`, `GET /listings/{id}`,
-  `POST /listings/{id}/approve`, `POST /listings/{id}/reject`. See `docs/api-specification.md`.
+- Moderation: `GET /api/v1/admin/me`, `GET /listings`, `POST /listings`, `GET /listings/{id}`,
+  `PUT /listings/{id}`, `POST /listings/{id}/approve`, `POST /listings/{id}/reject`.
+  See `docs/api-specification.md`.
+- Adding and editing are separate permissions from approving (`listings.create`, `listings.edit`,
+  `listings.review`). A hand-added listing goes live at once only when that admin may also approve
+  listings; otherwise it joins the queue, so adding is never a way around reviewing. Editing never
+  changes a listing's status.
 - Admin tokens carry the audience `admin` and are validated by their own authentication scheme, so an
   owner token never reaches an admin route (and vice versa). Permissions are read from the database on
   every request — removing a role or disabling an account takes effect on the next call, which was
@@ -103,9 +116,9 @@ Ordered by what unblocks the most.
    site must not be exposed outside the office network until this is built.** Inviting admins,
    assigning roles and changing passwords also have no screens yet; today an account is created or
    reset with the `create-admin` command.
-2. **The rest of admin moderation.** Only approve and reject exist. Suspending a live listing,
-   editing one on the owner's behalf, verifying a business, and handling abuse reports are not built,
-   although the permissions for them are seeded.
+2. **The rest of admin moderation.** Approve, reject, add and edit exist. Suspending a live listing,
+   verifying a business, and handling abuse reports are not built, although the permissions for them
+   are seeded.
 3. **Super-admin website** — placeholder only. No `/api/v1/super-admin` endpoints.
 4. **Media** — no tables, no upload endpoints, no Blob Storage code. Subscription media limits
    (Basic 4/0, Gold 4/2, Premium 16/4) are therefore not enforced anywhere.
@@ -137,8 +150,13 @@ Ordered by what unblocks the most.
   the page on purpose, so visitors cannot ask for huge pages.
 - **Admin sign-in has no MFA yet.** See "Not built yet" item 1. Password strength is judged by length
   only (12 characters minimum), and nothing forces a password change.
-- **An owner is not told when their listing is decided on.** The reason is on their listings screen
-  the next time they look; there is no SMS or email, because no notification channel exists yet.
+- **An owner is not told when their listing is decided on.** The status and the rejection reason are
+  on their listings screen the next time they look; there is no SMS or email, because no notification
+  channel exists yet.
+- **A hand-added listing has no owner account attached.** `created_by_user_id` is null, so the
+  business cannot manage it until someone links it to an owner — there is no screen for that yet.
+- **Public pages refresh on approval only when `REVALIDATE_TOKEN` and `MAIN_SITE_URL` are set** on
+  both apps. Without them the public site still catches up on its own within 60 seconds.
 - **The rejection reason is free text.** There is no list of standard reasons, so wording is up to the
   reviewer.
 - **Admin session lifetime** is 15 minutes for the access token and 7 days for the refresh token
