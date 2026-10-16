@@ -44,6 +44,16 @@ npm run dev:super-admin                                # super-admin :3002 (term
 Optional: copy `.env.example` to `.env` to change local database credentials, and `apps/<app>/.env.example`
 to `apps/<app>/.env.local` to change an app's settings. **Never commit `.env` files.**
 
+To sign in to the admin site you need an admin account. There is no sign-up page; create one from the
+command line (the password comes from an environment variable so it stays out of the shell history):
+
+```powershell
+$env:ADMIN_BOOTSTRAP_PASSWORD = "a long passphrase"
+dotnet run --project backend/BusinessDirectory.Api -- create-admin --email you@example.com --name "Your Name" --role super_admin
+```
+
+Run it again with the same email to reset that account's password.
+
 Quick checks once running:
 - http://localhost:5080/health/live, http://localhost:5080/health/ready (checks the database) and http://localhost:5080/api/v1/public/meta
 - http://localhost:3000/health, http://localhost:3001/health, http://localhost:3002/health

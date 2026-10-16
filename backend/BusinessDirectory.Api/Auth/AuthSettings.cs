@@ -3,13 +3,20 @@ using System.Security.Cryptography;
 namespace BusinessDirectory.Api.Auth;
 
 /// <summary>
-/// Owner-login settings. Secrets come from configuration (Key Vault / environment variables in Azure), never from source code.
+/// Login settings for owners and admins. Secrets come from configuration (Key Vault / environment variables in Azure), never from source code.
 /// In Development, missing keys are replaced by random ones generated at startup (sessions then end on every restart).
 /// Outside Development, missing or weak keys stop the app from starting.
 /// </summary>
 public sealed class AuthSettings
 {
     public const string OwnerAudience = "owner";
+
+    /// <summary>
+    /// Admin tokens carry their own audience, so an owner token presented on an /api/v1/admin route
+    /// fails validation outright instead of relying on a permission check further in.
+    /// (The super-admin surface gets "superadmin" when it is built; see docs/security.md.)
+    /// </summary>
+    public const string AdminAudience = "admin";
 
     public required byte[] JwtKey { get; init; }
     public required byte[] OtpKey { get; init; }
@@ -21,6 +28,14 @@ public sealed class AuthSettings
     public int ResendCooldownSeconds { get; init; } = 30;
     public int MaxOtpPerPhonePerHour { get; init; } = 5;
     public int MaxOtpPerIpPerHour { get; init; } = 20;
+
+    // Admin sign-in. Shorter-lived than an owner session: admins work in sittings, owners come back weeks later.
+    public int AdminAccessTokenMinutes { get; init; } = 15;
+    public int AdminRefreshTokenDays { get; init; } = 7;
+
+    /// <summary>Wrong passwords allowed before the account is locked for <see cref="AdminLockoutMinutes"/>.</summary>
+    public int AdminMaxFailedLogins { get; init; } = 5;
+    public int AdminLockoutMinutes { get; init; } = 15;
 
     public static AuthSettings Load(IConfiguration configuration, bool isDevelopment)
     {
@@ -36,6 +51,10 @@ public sealed class AuthSettings
             ResendCooldownSeconds = section.GetValue("ResendCooldownSeconds", 30),
             MaxOtpPerPhonePerHour = section.GetValue("MaxOtpPerPhonePerHour", 5),
             MaxOtpPerIpPerHour = section.GetValue("MaxOtpPerIpPerHour", 20),
+            AdminAccessTokenMinutes = section.GetValue("AdminAccessTokenMinutes", 15),
+            AdminRefreshTokenDays = section.GetValue("AdminRefreshTokenDays", 7),
+            AdminMaxFailedLogins = section.GetValue("AdminMaxFailedLogins", 5),
+            AdminLockoutMinutes = section.GetValue("AdminLockoutMinutes", 15),
         };
     }
 

@@ -67,6 +67,11 @@ export default async function MyListingsPage({ searchParams }: Props) {
                 </div>
                 <StatusBadge status={listing.status} />
               </div>
+              {listing.status === "rejected" && listing.reviewNote ? (
+                <p className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-900">
+                  <span className="font-semibold">What to change:</span> {listing.reviewNote}
+                </p>
+              ) : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 <Link
                   href={`/account/listings/${listing.id}/edit`}

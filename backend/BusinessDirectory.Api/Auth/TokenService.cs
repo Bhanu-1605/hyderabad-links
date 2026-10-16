@@ -7,15 +7,31 @@ using Microsoft.IdentityModel.Tokens;
 
 namespace BusinessDirectory.Api.Auth;
 
-/// <summary>Creates short-lived owner access tokens (JWT) and opaque refresh tokens (stored only as a SHA-256 hash).</summary>
+/// <summary>
+/// Creates short-lived access tokens (JWT) and opaque refresh tokens (stored only as a SHA-256 hash).
+/// Owner and admin tokens are signed with the same key but carry different audiences, and each audience
+/// is validated by its own authentication scheme, so neither realm's token works on the other's routes.
+/// A token carries nothing but the subject id: permissions are read from the database on every request,
+/// so removing a role takes effect immediately rather than when the token expires.
+/// </summary>
 public sealed class TokenService(AuthSettings settings)
 {
-    public TokenValidationParameters ValidationParameters => new()
+    public TokenValidationParameters ValidationParameters => ParametersFor(settings.Audience);
+
+    public TokenValidationParameters AdminValidationParameters => ParametersFor(AuthSettings.AdminAudience);
+
+    public (string Token, int ExpiresInSeconds) CreateAccessToken(long userId) =>
+        Create(userId, settings.Audience, settings.AccessTokenMinutes);
+
+    public (string Token, int ExpiresInSeconds) CreateAdminAccessToken(long adminUserId) =>
+        Create(adminUserId, AuthSettings.AdminAudience, settings.AdminAccessTokenMinutes);
+
+    private TokenValidationParameters ParametersFor(string audience) => new()
     {
         ValidateIssuer = true,
         ValidIssuer = settings.Issuer,
         ValidateAudience = true,
-        ValidAudience = settings.Audience,
+        ValidAudience = audience,
         ValidateLifetime = true,
         ValidateIssuerSigningKey = true,
         IssuerSigningKey = new SymmetricSecurityKey(settings.JwtKey),
@@ -23,14 +39,14 @@ public sealed class TokenService(AuthSettings settings)
         NameClaimType = JwtRegisteredClaimNames.Sub,
     };
 
-    public (string Token, int ExpiresInSeconds) CreateAccessToken(long userId)
+    private (string Token, int ExpiresInSeconds) Create(long subjectId, string audience, int minutes)
     {
-        var lifetime = TimeSpan.FromMinutes(settings.AccessTokenMinutes);
+        var lifetime = TimeSpan.FromMinutes(minutes);
         var descriptor = new SecurityTokenDescriptor
         {
-            Subject = new ClaimsIdentity(new[] { new Claim(JwtRegisteredClaimNames.Sub, userId.ToString(System.Globalization.CultureInfo.InvariantCulture)) }),
+            Subject = new ClaimsIdentity(new[] { new Claim(JwtRegisteredClaimNames.Sub, subjectId.ToString(System.Globalization.CultureInfo.InvariantCulture)) }),
             Issuer = settings.Issuer,
-            Audience = settings.Audience,
+            Audience = audience,
             Expires = DateTime.UtcNow.Add(lifetime),
             SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(settings.JwtKey), SecurityAlgorithms.HmacSha256),
         };

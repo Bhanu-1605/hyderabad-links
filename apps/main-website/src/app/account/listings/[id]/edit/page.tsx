@@ -43,6 +43,11 @@ export default async function EditListingPage({ params, searchParams }: Props) {
         <StatusBadge status={listing.status} />
       </div>
       <p className="mt-1 text-neutral-600">{describeStatus(listing.status).help}</p>
+      {listing.status === "rejected" && listing.reviewNote ? (
+        <p className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-900">
+          <span className="font-semibold">What to change:</span> {listing.reviewNote}
+        </p>
+      ) : null}
       {listing.status === "active" ? (
         <p className="mt-1 text-sm">
           <Link href={listing.url} className="text-brand-700 hover:underline">

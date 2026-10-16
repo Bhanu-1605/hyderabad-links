@@ -21,3 +21,6 @@ Assumed decisions can be revisited, but changing them after data exists costs mo
 | D14 | Email provider: Resend. Maps provider: undecided (before Phase 2) | Assumed / Open | |
 | D15 | Admin and super-admin domains: env configuration only | Approved | |
 | D16 | Website is English only for now; no language routing in URLs | Approved | Telugu/Hindi would need a locale segment in every URL: decide before launch if ever wanted |
+| D17 | Admin passwords hashed with PBKDF2-HMAC-SHA256 (210,000 iterations, per-password salt) from the .NET base library, stored as `pbkdf2-sha256$iterations$salt$hash` | Assumed | Follows D7 (no ASP.NET Core Identity store). The iteration count travels with each hash, so it can be raised later without invalidating existing passwords |
+| D18 | Admin sign-in is password-only for now; the TOTP MFA the security notes require is not built yet | Assumed | The tables exist and are unused. The admin site must not be exposed publicly until MFA is added — see `docs/PROJECT_STATUS.md` |
+| D19 | The latest review decision is stored on the listing (`review_note`, `reviewed_at`, `reviewed_by_admin_id`, migration V0004); the audit log keeps the full history | Assumed | The owner's screens need the current reason without reading audit rows |

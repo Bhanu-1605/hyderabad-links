@@ -49,8 +49,11 @@ public static partial class ListingValidator
     private static partial Regex SlugPattern();
 
     /// <param name="requireLocality">True when creating (the area cannot be changed afterwards).</param>
-    /// <param name="fallbackPhone">The owner's verified login number, used when no phone is given.</param>
-    public static ListingValidationResult Validate(ListingInput input, bool requireLocality, string fallbackPhone)
+    /// <param name="fallbackPhone">
+    /// The owner's verified login number, used when no phone is given. Null when an admin is adding a
+    /// listing on someone's behalf: there is no number to fall back on, so one must be typed in.
+    /// </param>
+    public static ListingValidationResult Validate(ListingInput input, bool requireLocality, string? fallbackPhone)
     {
         var errors = new Dictionary<string, string[]>();
         void Fail(string field, string message) => errors[field] = [message];
@@ -120,6 +123,10 @@ public static partial class ListingValidator
                 Fail("phonePrimary", "Enter a valid 10-digit Indian mobile number.");
             }
         }
+        else if (phonePrimary is null)
+        {
+            Fail("phonePrimary", "Enter the business phone number.");
+        }
 
         string? phoneWhatsapp = null;
         if (Clean(input.PhoneWhatsapp) is { } whatsappRaw)
@@ -168,7 +175,7 @@ public static partial class ListingValidator
         }
 
         return new ListingValidationResult(
-            new ValidListing(name!, description, city, locality, category!, address, pincode, phonePrimary, phoneWhatsapp, website, input.Latitude, input.Longitude),
+            new ValidListing(name!, description, city, locality, category!, address, pincode, phonePrimary!, phoneWhatsapp, website, input.Latitude, input.Longitude),
             errors);
     }
 

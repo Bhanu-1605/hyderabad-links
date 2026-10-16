@@ -21,6 +21,13 @@ if (args.Contains("seed-dev"))
     Environment.Exit(MigrationRunner.SeedDev(builder.Configuration, builder.Environment.ContentRootPath, builder.Environment.IsDevelopment()));
 }
 
+// `-- create-admin --email ... --name ... [--role admin|super_admin]` creates the first admin account.
+// There is deliberately no HTTP endpoint for this (docs/security.md).
+if (args.Contains("create-admin"))
+{
+    Environment.Exit(AdminBootstrap.Run(builder.Configuration, args));
+}
+
 // ---- Configuration -------------------------------------------------------------------
 // Everything deployment-specific (origins, limits, later: connection strings) comes from
 // configuration / environment variables. Nothing environment-specific is hardcoded here.
@@ -77,17 +84,30 @@ else
 {
     builder.Services.AddSingleton<ISmsSender, UnconfiguredSmsSender>();   // replaced by the MSG91 sender before launch
 }
+// Two bearer schemes, one per realm: both check the same signature, but each accepts only its own
+// audience. Pinning the scheme to the policy is what stops an owner token working on an admin route.
+var tokenService = new TokenService(authSettings);
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
         options.MapInboundClaims = false;
-        options.TokenValidationParameters = new TokenService(authSettings).ValidationParameters;
+        options.TokenValidationParameters = tokenService.ValidationParameters;
+    })
+    .AddJwtBearer(AdminAccess.Scheme, options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = tokenService.AdminValidationParameters;
     });
 builder.Services.AddAuthorization(options =>
 {
     // Separate audiences keep owner, admin and super-admin tokens from being accepted by each other's endpoints.
-    options.AddPolicy("Owner", policy => policy.RequireAuthenticatedUser());
+    options.AddPolicy("Owner", policy => policy
+        .AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme)
+        .RequireAuthenticatedUser());
+    options.AddPolicy(AdminAccess.Policy, policy => policy
+        .AddAuthenticationSchemes(AdminAccess.Scheme)
+        .RequireAuthenticatedUser());
 });
 
 // Baseline per-IP limit. Stricter, database-backed OTP limits are in OwnerAuthEndpoints.
@@ -159,6 +179,9 @@ publicApi.MapPublicSearchEndpoints();
 
 app.MapOwnerAuthEndpoints();   // /api/v1/auth/owner: request code, verify code, refresh, logout
 app.MapMeEndpoints();          // /api/v1/me: signed-in owner
+
+app.MapAdminAuthEndpoints();   // /api/v1/auth/admin: email + password login, refresh, logout
+app.MapAdminEndpoints();       // /api/v1/admin: signed-in administrator, listing moderation
 
 app.Run();
 

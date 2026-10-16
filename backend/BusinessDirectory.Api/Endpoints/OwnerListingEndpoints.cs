@@ -33,12 +33,15 @@ public static class OwnerListingEndpoints
         string CategorySlug,
         string CategoryName,
         string Status,
+        /// <summary>Why a reviewer rejected the listing. The owner reads this and fixes it.</summary>
+        string? ReviewNote,
+        DateTimeOffset? ReviewedAt,
         string Url);
 
     private const string OwnedListingSelect =
         @"SELECT li.id, li.slug, li.name, li.description, li.address_line, li.pincode, li.phone_primary, li.phone_whatsapp,
                  li.website_url, ST_Y(li.location::geometry), ST_X(li.location::geometry),
-                 ci.slug, lo.slug, lo.name, pc.slug, pc.name, li.status
+                 ci.slug, lo.slug, lo.name, pc.slug, pc.name, li.status, li.review_note, li.reviewed_at
           FROM listings li
           JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
           JOIN localities lo ON lo.id = li.locality_id
@@ -131,58 +134,24 @@ public static class OwnerListingEndpoints
             return Results.Problem($"You can have at most {MaxListingsPerOwner} listings.", statusCode: StatusCodes.Status409Conflict);
         }
 
-        int localityId;
-        double centerLat;
-        double centerLng;
-        await using (var locality = new NpgsqlCommand(
-            @"SELECT lo.id, ST_Y(lo.center::geometry), ST_X(lo.center::geometry)
-              FROM localities lo JOIN cities ci ON ci.id = lo.city_id
-              WHERE ci.slug = @city AND lo.slug = @locality AND ci.is_active AND lo.is_active", conn, tx))
+        var locality = await ListingWriter.FindLocality(conn, tx, value.CitySlug, value.LocalitySlug!, ct);
+        if (locality is null)
         {
-            locality.Parameters.AddWithValue("city", value.CitySlug);
-            locality.Parameters.AddWithValue("locality", value.LocalitySlug!);
-            await using var reader = await locality.ExecuteReaderAsync(ct);
-            if (!await reader.ReadAsync(ct))
-            {
-                return Results.ValidationProblem(new Dictionary<string, string[]> { ["localitySlug"] = ["Unknown area."] });
-            }
-            localityId = reader.GetInt32(0);
-            centerLat = reader.GetDouble(1);
-            centerLng = reader.GetDouble(2);
+            return Results.ValidationProblem(new Dictionary<string, string[]> { ["localitySlug"] = ["Unknown area."] });
         }
 
-        var categoryId = await FindCategoryId(conn, tx, value.CategorySlug, ct);
+        var categoryId = await ListingWriter.FindCategoryId(conn, tx, value.CategorySlug, ct);
         if (categoryId is null)
         {
             return Results.ValidationProblem(new Dictionary<string, string[]> { ["categorySlug"] = ["Unknown category."] });
         }
 
-        // Choose a free slug within the area: name, name-2, name-3 ...
-        var baseSlug = SlugGenerator.FromName(value.Name);
-        var taken = new HashSet<string>();
-        await using (var slugs = new NpgsqlCommand(
-            "SELECT slug FROM listings WHERE locality_id = @locality AND (slug = @base OR slug LIKE @pattern)", conn, tx))
-        {
-            slugs.Parameters.AddWithValue("locality", localityId);
-            slugs.Parameters.AddWithValue("base", baseSlug);
-            slugs.Parameters.AddWithValue("pattern", baseSlug + "-%");
-            await using var reader = await slugs.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                taken.Add(reader.GetString(0));
-            }
-        }
-        var slug = SlugGenerator.NextFree(baseSlug, taken);
+        var slug = await ListingWriter.ChooseSlug(conn, tx, locality.Id, value.Name, ct);
 
         long listingId;
         try
         {
-            long businessId;
-            await using (var business = new NpgsqlCommand("INSERT INTO businesses (name) VALUES (@name) RETURNING id", conn, tx))
-            {
-                business.Parameters.AddWithValue("name", value.Name);
-                businessId = (long)(await business.ExecuteScalarAsync(ct))!;
-            }
+            var businessId = await ListingWriter.InsertBusiness(conn, tx, value.Name, ct);
 
             await using (var member = new NpgsqlCommand(
                 "INSERT INTO business_members (business_id, user_id, role) VALUES (@business, @user, 'owner')", conn, tx))
@@ -192,37 +161,11 @@ public static class OwnerListingEndpoints
                 await member.ExecuteNonQueryAsync(ct);
             }
 
-            await using (var listing = new NpgsqlCommand(
-                @"INSERT INTO listings (business_id, locality_id, slug, name, description, address_line, pincode, location,
-                                        phone_primary, phone_whatsapp, website_url, status, source, created_by_user_id)
-                  VALUES (@business, @locality, @slug, @name, @description, @address, @pincode,
-                          ST_SetSRID(ST_MakePoint(@lng, @lat), 4326)::geography,
-                          @phone, @whatsapp, @website, 'draft', 'owner', @user)
-                  RETURNING id", conn, tx))
-            {
-                listing.Parameters.AddWithValue("business", businessId);
-                listing.Parameters.AddWithValue("locality", localityId);
-                listing.Parameters.AddWithValue("slug", slug);
-                listing.Parameters.AddWithValue("name", value.Name);
-                AddText(listing, "description", value.Description);
-                AddText(listing, "address", value.AddressLine);
-                AddText(listing, "pincode", value.Pincode);
-                listing.Parameters.AddWithValue("lng", value.Longitude ?? centerLng);
-                listing.Parameters.AddWithValue("lat", value.Latitude ?? centerLat);
-                listing.Parameters.AddWithValue("phone", value.PhonePrimary);
-                AddText(listing, "whatsapp", value.PhoneWhatsapp);
-                AddText(listing, "website", value.WebsiteUrl);
-                listing.Parameters.AddWithValue("user", userId);
-                listingId = (long)(await listing.ExecuteScalarAsync(ct))!;
-            }
+            // An owner's listing starts as a draft: they submit it for review when it is ready.
+            listingId = await ListingWriter.InsertListing(
+                conn, tx, businessId, locality, slug, value, status: "draft", source: "owner", createdByUserId: userId, ct);
 
-            await using (var link = new NpgsqlCommand(
-                "INSERT INTO listing_categories (listing_id, category_id, is_primary) VALUES (@listing, @category, true)", conn, tx))
-            {
-                link.Parameters.AddWithValue("listing", listingId);
-                link.Parameters.AddWithValue("category", categoryId.Value);
-                await link.ExecuteNonQueryAsync(ct);
-            }
+            await ListingWriter.AddPrimaryCategory(conn, tx, listingId, categoryId.Value, ct);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
         {
@@ -276,41 +219,14 @@ public static class OwnerListingEndpoints
             return Results.ValidationProblem(validation.Errors);
         }
 
-        var categoryId = await FindCategoryId(conn, tx, value.CategorySlug, ct);
+        var categoryId = await ListingWriter.FindCategoryId(conn, tx, value.CategorySlug, ct);
         if (categoryId is null)
         {
             return Results.ValidationProblem(new Dictionary<string, string[]> { ["categorySlug"] = ["Unknown category."] });
         }
 
-        await using (var update = new NpgsqlCommand(
-            @"UPDATE listings SET
-                  name = @name, description = @description, address_line = @address, pincode = @pincode,
-                  phone_primary = @phone, phone_whatsapp = @whatsapp, website_url = @website,
-                  location = ST_SetSRID(ST_MakePoint(@lng, @lat), 4326)::geography,
-                  updated_at = now()
-              WHERE id = @id", conn, tx))
-        {
-            update.Parameters.AddWithValue("id", id);
-            update.Parameters.AddWithValue("name", value.Name);
-            AddText(update, "description", value.Description);
-            AddText(update, "address", value.AddressLine);
-            AddText(update, "pincode", value.Pincode);
-            update.Parameters.AddWithValue("phone", value.PhonePrimary);
-            AddText(update, "whatsapp", value.PhoneWhatsapp);
-            AddText(update, "website", value.WebsiteUrl);
-            // No new map point sent: keep the current one.
-            update.Parameters.AddWithValue("lng", value.Longitude ?? lockResult.Value.Longitude);
-            update.Parameters.AddWithValue("lat", value.Latitude ?? lockResult.Value.Latitude);
-            await update.ExecuteNonQueryAsync(ct);
-        }
-
-        await using (var category = new NpgsqlCommand(
-            "UPDATE listing_categories SET category_id = @category WHERE listing_id = @id AND is_primary", conn, tx))
-        {
-            category.Parameters.AddWithValue("id", id);
-            category.Parameters.AddWithValue("category", categoryId.Value);
-            await category.ExecuteNonQueryAsync(ct);
-        }
+        await ListingWriter.UpdateListing(conn, tx, id, value, lockResult.Value.Latitude, lockResult.Value.Longitude, ct);
+        await ListingWriter.SetPrimaryCategory(conn, tx, id, categoryId.Value, ct);
 
         await WriteAudit(conn, tx, userId, "listing.updated", id, http, ct);
         var dto = await LoadOwned(conn, tx, userId, id, ct);
@@ -365,7 +281,9 @@ public static class OwnerListingEndpoints
             return Results.ValidationProblem(missing);
         }
 
-        await using (var submit = new NpgsqlCommand("UPDATE listings SET status = 'pending_review', updated_at = now() WHERE id = @id", conn, tx))
+        // The old rejection reason goes with the old version: the owner has just changed the listing.
+        await using (var submit = new NpgsqlCommand(
+            "UPDATE listings SET status = 'pending_review', review_note = NULL, updated_at = now() WHERE id = @id", conn, tx))
         {
             submit.Parameters.AddWithValue("id", id);
             await submit.ExecuteNonQueryAsync(ct);
@@ -402,6 +320,8 @@ public static class OwnerListingEndpoints
             category,
             r.GetString(15),
             r.GetString(16),
+            r.IsDBNull(17) ? null : r.GetString(17),
+            r.IsDBNull(18) ? null : r.GetFieldValue<DateTimeOffset>(18),
             $"/{city}/{locality}/{category}/{slug}");
     }
 
@@ -437,15 +357,6 @@ public static class OwnerListingEndpoints
         return (string?)await command.ExecuteScalarAsync(ct);
     }
 
-    /// <summary>Listings attach to sub-categories (level 2) only.</summary>
-    private static async Task<int?> FindCategoryId(NpgsqlConnection conn, NpgsqlTransaction tx, string slug, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand("SELECT id FROM categories WHERE slug = @slug AND level = 2 AND is_active", conn, tx);
-        command.Parameters.AddWithValue("slug", slug);
-        var result = await command.ExecuteScalarAsync(ct);
-        return result is int id ? id : null;
-    }
-
     private static async Task WriteAudit(NpgsqlConnection conn, NpgsqlTransaction tx, long userId, string action, long listingId, HttpContext http, CancellationToken ct)
     {
         IPAddress? ip = http.Connection.RemoteIpAddress;
@@ -458,7 +369,4 @@ public static class OwnerListingEndpoints
         command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
-
-    private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
 }

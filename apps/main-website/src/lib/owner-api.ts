@@ -24,6 +24,9 @@ export type OwnerListing = {
   categorySlug: string;
   categoryName: string;
   status: string;
+  /** Why a reviewer rejected it. Shown to the owner so they know what to fix. */
+  reviewNote: string | null;
+  reviewedAt: string | null;
   url: string;
 };
 
@@ -139,7 +142,7 @@ export function describeStatus(status: string): { label: string; tone: "grey" | 
     case "active":
       return { label: "Live", tone: "green", help: "Visible to everyone on the site." };
     case "rejected":
-      return { label: "Needs changes", tone: "red", help: "Update your listing and submit it again." };
+      return { label: "Needs changes", tone: "red", help: "We could not publish it as it is. Make the change below, then submit it again." };
     case "suspended":
       return { label: "Suspended", tone: "red", help: "This listing is hidden. Please contact support." };
     default:
