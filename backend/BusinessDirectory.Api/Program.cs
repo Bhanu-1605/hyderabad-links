@@ -155,6 +155,7 @@ publicApi.MapGet("/meta", () => Results.Ok(new
     version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown",
 }));
 publicApi.MapPublicDirectoryEndpoints();
+publicApi.MapPublicSearchEndpoints();
 
 app.MapOwnerAuthEndpoints();   // /api/v1/auth/owner: request code, verify code, refresh, logout
 app.MapMeEndpoints();          // /api/v1/me: signed-in owner

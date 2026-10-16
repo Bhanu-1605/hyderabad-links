@@ -2,13 +2,22 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { JsonLd } from "@/components/JsonLd";
 import { ListingCard } from "@/components/ListingCard";
+import { Pagination } from "@/components/Pagination";
 import { SearchBox } from "@/components/SearchBox";
-import { getCategories, getLocalities, getNearby } from "@/lib/api";
+import { getCategories, getLocalities, searchListings } from "@/lib/api";
 import { DEFAULT_CITY, DEFAULT_CITY_NAME } from "@/lib/brand";
 import { findCategory, toSearchCategories } from "@/lib/categories";
 import { absoluteUrl } from "@/lib/format";
+import type { SearchCriteria, SearchResults } from "@/lib/types";
 
-type Props = { params: Promise<{ city: string; locality: string; category: string }> };
+/** Businesses in the area come first, and those just outside it still appear. */
+const RADIUS_KM = 8;
+const PAGE_SIZE = 20;
+
+type Props = {
+  params: Promise<{ city: string; locality: string; category: string }>;
+  searchParams: Promise<{ page?: string }>;
+};
 
 async function loadPage(params: Props["params"]) {
   const { city, locality, category } = await params;
@@ -20,24 +29,63 @@ async function loadPage(params: Props["params"]) {
   return { city, tree, localities, area, found };
 }
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const page = await loadPage(params);
-  if (!page) return { title: "Not found", robots: { index: false } };
-  const title = `${page.found.name} in ${page.area.name}, ${DEFAULT_CITY_NAME}`;
-  const listings = await getNearby({ lat: page.area.latitude, lng: page.area.longitude, category: page.found.slug, radiusKm: 8, limit: 30 });
+/** The same criteria in metadata and in the page body, so Next.js reuses one API request. */
+function criteriaFor(area: { latitude: number; longitude: number }, categorySlug: string, page: number): SearchCriteria {
   return {
-    title,
-    description: `Find ${page.found.name.toLowerCase()} in and near ${page.area.name}, ${DEFAULT_CITY_NAME}. Call or WhatsApp local businesses directly.`,
-    alternates: { canonical: absoluteUrl(`/${page.city}/${page.area.slug}/${page.found.slug}`) },
-    robots: listings.length === 0 ? { index: false, follow: true } : undefined, // avoid indexing empty pages
+    city: DEFAULT_CITY,
+    category: categorySlug,
+    lat: area.latitude,
+    lng: area.longitude,
+    radiusKm: RADIUS_KM,
+    sort: "distance",
+    page,
+    pageSize: PAGE_SIZE,
   };
 }
 
-export default async function CategoryInLocalityPage({ params }: Props) {
+function pageNumber(raw: string | undefined): number {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
+}
+
+export async function generateMetadata({ params, searchParams }: Props): Promise<Metadata> {
+  const page = await loadPage(params);
+  if (!page) return { title: "Not found", robots: { index: false } };
+
+  const pageNo = pageNumber((await searchParams).page);
+  const title = `${page.found.name} in ${page.area.name}, ${DEFAULT_CITY_NAME}`;
+  const canonical = absoluteUrl(`/${page.city}/${page.area.slug}/${page.found.slug}`);
+
+  // An area with nothing in it yet is a thin page; keep it out of the index until it has content.
+  let isEmpty = true;
+  try {
+    isEmpty = (await searchListings(criteriaFor(page.area, page.found.slug, pageNo))).total === 0;
+  } catch {
+    // A failed lookup must not break metadata; fall back to not indexing.
+  }
+
+  return {
+    title: pageNo > 1 ? `${title} - page ${pageNo}` : title,
+    description: `Find ${page.found.name.toLowerCase()} in and near ${page.area.name}, ${DEFAULT_CITY_NAME}. Call or WhatsApp local businesses directly.`,
+    alternates: { canonical },
+    robots: isEmpty || pageNo > 1 ? { index: false, follow: true } : undefined,
+  };
+}
+
+export default async function CategoryInLocalityPage({ params, searchParams }: Props) {
   const page = await loadPage(params);
   if (!page) notFound();
 
-  const listings = await getNearby({ lat: page.area.latitude, lng: page.area.longitude, category: page.found.slug, radiusKm: 8, limit: 30 });
+  const pageNo = pageNumber((await searchParams).page);
+
+  let results: SearchResults | null = null;
+  try {
+    results = await searchListings(criteriaFor(page.area, page.found.slug, pageNo));
+  } catch {
+    results = null;
+  }
+
+  const basePath = `/${page.city}/${page.area.slug}/${page.found.slug}`;
 
   return (
     <main className="mx-auto max-w-5xl px-4 pt-8">
@@ -46,31 +94,45 @@ export default async function CategoryInLocalityPage({ params }: Props) {
       <h1 className="mt-8 text-2xl font-bold">
         {page.found.name} in {page.area.name}, {DEFAULT_CITY_NAME}
       </h1>
-      <p className="mt-1 text-sm text-neutral-500">Closest first, including nearby areas.</p>
 
-      {listings.length === 0 ? (
+      {results === null ? (
+        <div role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4">
+          <p className="font-medium text-red-900">We could not load these listings just now.</p>
+          <p className="mt-1 text-sm text-red-800">Please refresh the page in a moment.</p>
+        </div>
+      ) : results.total === 0 ? (
         <p className="mt-4 text-neutral-600">No listings here yet. Try a nearby area or another service.</p>
       ) : (
-        <ul className="mt-4 grid gap-3">
-          {listings.map((listing) => (
-            <ListingCard key={listing.url} listing={listing} />
-          ))}
-        </ul>
-      )}
+        <>
+          <p className="mt-1 text-sm text-neutral-500">
+            {results.total} {results.total === 1 ? "business" : "businesses"} within {RADIUS_KM} km. Closest first, including
+            nearby areas.
+          </p>
 
-      <JsonLd
-        data={{
-          "@context": "https://schema.org",
-          "@type": "ItemList",
-          name: `${page.found.name} in ${page.area.name}, ${DEFAULT_CITY_NAME}`,
-          itemListElement: listings.map((listing, index) => ({
-            "@type": "ListItem",
-            position: index + 1,
-            url: absoluteUrl(listing.url),
-            name: listing.name,
-          })),
-        }}
-      />
+          <ul className="mt-4 grid gap-3">
+            {results.items.map((listing) => (
+              <ListingCard key={listing.url} listing={listing} />
+            ))}
+          </ul>
+
+          <Pagination page={results.page} totalPages={results.totalPages} params={{}} basePath={basePath} />
+
+          <JsonLd
+            data={{
+              "@context": "https://schema.org",
+              "@type": "ItemList",
+              name: `${page.found.name} in ${page.area.name}, ${DEFAULT_CITY_NAME}`,
+              itemListElement: results.items.map((listing, index) => ({
+                "@type": "ListItem",
+                // Positions continue across pages so the list stays coherent for crawlers.
+                position: (results.page - 1) * results.pageSize + index + 1,
+                url: absoluteUrl(listing.url),
+                name: listing.name,
+              })),
+            }}
+          />
+        </>
+      )}
     </main>
   );
 }

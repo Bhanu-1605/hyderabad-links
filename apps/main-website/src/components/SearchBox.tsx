@@ -13,8 +13,12 @@ type Props = {
 };
 
 /**
- * Service + location search. Location flow: GPS if the visitor allows it, otherwise the area picker.
- * (IP-based city detection is not needed yet: Hyderabad is the only city.)
+ * Business + service + location search. Location flow: GPS if the visitor allows it, otherwise the
+ * area picker. (IP-based city detection is not needed yet: Hyderabad is the only city.)
+ *
+ * When the words typed name a known service and an area is chosen, this goes to that area's
+ * category page, which is the indexable URL. Anything else - a business name, a stray keyword, no
+ * area - goes to /search, where the API matches against listing names, descriptions and services.
  */
 export function SearchBox({ categories, localities, initialQuery = "" }: Props) {
   const router = useRouter();
@@ -26,28 +30,37 @@ export function SearchBox({ categories, localities, initialQuery = "" }: Props) 
 
   const suggestions = Array.from(new Set(categories.flatMap((c) => [c.name, ...c.terms])));
 
-  function pickCategory(): SearchCategory | null {
-    const category = resolveCategory(query, categories);
-    if (!category) setMessage("Please choose a service from the suggestions, for example Plumbers.");
-    return category;
+  /** The words typed, as a /search query string. A recognised service also narrows by category. */
+  function searchParams(category: SearchCategory | null): URLSearchParams {
+    const params = new URLSearchParams();
+    const text = query.trim();
+    if (text) params.set("q", text);
+    if (category) params.set("category", category.slug);
+    return params;
   }
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setMessage(null);
-    const category = pickCategory();
-    if (!category) return;
-    if (!locality) {
-      setMessage("Choose your area, or use your current location.");
+
+    if (!query.trim() && !locality) {
+      setMessage("Type what you are looking for, or choose an area.");
       return;
     }
-    router.push(`/${DEFAULT_CITY}/${locality}/${category.slug}`);
+
+    const category = resolveCategory(query, categories);
+    if (category && locality) {
+      router.push(`/${DEFAULT_CITY}/${locality}/${category.slug}`);
+      return;
+    }
+
+    const params = searchParams(category);
+    if (locality) params.set("locality", locality);
+    router.push(`/search?${params.toString()}`);
   }
 
   function findNearMe() {
     setMessage(null);
-    const category = pickCategory();
-    if (!category) return;
     if (!("geolocation" in navigator)) {
       setMessage("Your browser cannot share its location. Please choose your area instead.");
       return;
@@ -55,9 +68,12 @@ export function SearchBox({ categories, localities, initialQuery = "" }: Props) 
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const lat = position.coords.latitude.toFixed(5);
-        const lng = position.coords.longitude.toFixed(5);
-        router.push(`/search?category=${encodeURIComponent(category.slug)}&lat=${lat}&lng=${lng}`);
+        const params = searchParams(resolveCategory(query, categories));
+        params.set("lat", position.coords.latitude.toFixed(5));
+        params.set("lng", position.coords.longitude.toFixed(5));
+        params.set("radiusKm", "10");
+        params.set("sort", "distance");
+        router.push(`/search?${params.toString()}`);
       },
       () => {
         setLocating(false);

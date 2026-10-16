@@ -1,4 +1,4 @@
-import type { Category, ListingDetail, Locality, NearbyListing } from "./types";
+import type { Category, ListingDetail, Locality, SearchCriteria, SearchResults } from "./types";
 
 // Server-side only: the browser never calls the API directly (architecture principle 1).
 // API_BASE_URL is read at runtime, so one build works in staging and production.
@@ -20,18 +20,20 @@ export async function getLocalities(citySlug: string): Promise<Locality[] | null
   return getJson<Locality[]>(`/api/v1/public/cities/${encodeURIComponent(citySlug)}/localities`, 300);
 }
 
-export async function getNearby(options: {
-  lat: number;
-  lng: number;
-  category?: string;
-  radiusKm?: number;
-  limit?: number;
-}): Promise<NearbyListing[]> {
-  const query = new URLSearchParams({ lat: String(options.lat), lng: String(options.lng) });
-  if (options.category) query.set("category", options.category);
-  if (options.radiusKm) query.set("radiusKm", String(options.radiusKm));
-  if (options.limit) query.set("limit", String(options.limit));
-  return (await getJson<NearbyListing[]>(`/api/v1/public/listings/nearby?${query.toString()}`, 60)) ?? [];
+/**
+ * Database-backed listing search: keyword, category, locality, proximity, sorting and paging.
+ * Throws when the API rejects the request or is unreachable, so the page can show an error state.
+ */
+export async function searchListings(criteria: SearchCriteria): Promise<SearchResults> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(criteria)) {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, String(value));
+    }
+  }
+  const results = await getJson<SearchResults>(`/api/v1/public/listings/search?${query.toString()}`, 60);
+  // The endpoint always answers 200, so null would mean a shape change rather than "not found".
+  return results ?? { items: [], page: 1, pageSize: 0, total: 0, totalPages: 0 };
 }
 
 export async function getListing(citySlug: string, localitySlug: string, slug: string): Promise<ListingDetail | null> {

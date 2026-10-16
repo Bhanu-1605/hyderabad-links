@@ -11,8 +11,11 @@ Three independent Next.js websites share **one ASP.NET Core API** and **one Post
 | Super-admin website | `apps/super-admin-website` | http://localhost:3002 | *to be decided* (env-configured) |
 | API | `backend/BusinessDirectory.Api` | http://localhost:5080 | *to be decided* |
 
-**Status:** Phase 1 in progress. Schema `V0001`-`V0003` (geography, categories, users, businesses, listings, auth, admin, audit) and the Hyderabad reference seeds exist. The main website has a home page, search, area/category results and listing pages (English only); admin and super-admin are still placeholders. Owner login by phone OTP and owner listing create/edit/submit exist in the API (Phase 3b and 3c); the main website now has the owner screens too (Phase 3d): sign in with phone OTP at `/login`, then `/account/listings` to add, edit and submit listings for review. Admin review comes in Phase 5.
-See `docs/` for the architecture, decisions and roadmap.
+**Status:** Schema `V0001`-`V0003` and the Hyderabad reference seeds exist. The main website has the home page,
+database-backed search (keyword, category, locality, proximity, sorting and paging), locality/category pages and
+listing pages (English only). Owner phone-OTP login and listing create/edit/submit work end to end. Admin and
+super-admin are still placeholders, so submitted listings cannot be approved yet.
+See `docs/PROJECT_STATUS.md` for the current state and the next step, and `docs/` for architecture and decisions.
 
 ## Prerequisites (Windows; see docs/local-development.md for details)
 
@@ -53,6 +56,13 @@ npm run verify
 
 Runs: migration safety check, its self-tests, TypeScript checks, production builds of all three apps, the .NET build
 and the .NET tests.
+
+Database behaviour has its own checks. They insert, assert and roll back, so they leave no data and are safe to
+re-run against a running local database:
+
+```powershell
+Get-Content database/checks/search_smoke.sql | docker exec -i hl-postgres psql -U hl_dev -d hyderabad_links -v ON_ERROR_STOP=1
+```
 
 ## Repository layout
 
