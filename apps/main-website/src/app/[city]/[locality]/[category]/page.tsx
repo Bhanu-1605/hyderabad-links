@@ -89,7 +89,7 @@ export default async function CategoryInLocalityPage({ params, searchParams }: P
 
   return (
     <main className="mx-auto max-w-5xl px-4 pt-8">
-      <SearchBox categories={toSearchCategories(page.tree)} localities={page.localities} initialQuery={page.found.name} />
+      <SearchBox categories={toSearchCategories(page.tree)} initialQuery={page.found.name} />
 
       <h1 className="mt-8 text-2xl font-bold">
         {page.found.name} in {page.area.name}, {DEFAULT_CITY_NAME}

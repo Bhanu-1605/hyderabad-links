@@ -9,13 +9,21 @@ export const metadata: Metadata = { title: "Add your business" };
 
 export default async function NewListingPage() {
   const [categories, localities] = await Promise.all([getCategories(), getLocalities(DEFAULT_CITY)]);
+
   return (
-    <main className="mx-auto max-w-2xl px-4 pt-8">
-      <Link href="/account/listings" className="text-sm text-brand-700 hover:underline">
-        Back to my listings
+    <main className="mx-auto max-w-3xl px-5 py-10 sm:px-8">
+      <Link href="/account/listings" className="text-sm font-bold text-brand-700 hover:underline">
+        <span aria-hidden="true">&larr;</span> Back to my listings
       </Link>
-      <h1 className="mt-2 text-2xl font-bold">Add your business</h1>
-      <p className="mt-1 text-neutral-600">Start with the basics. It stays private as a draft until you submit it for review.</p>
+
+      <div className="mt-4 border-b border-line pb-5">
+        <p className="text-[11px] font-black tracking-[0.22em] text-muted">BUSINESS OWNER</p>
+        <h1 className="mt-1 text-3xl font-black tracking-tight text-brand-800">Add your business</h1>
+        <p className="mt-2 text-muted">
+          Start with the basics. It stays private as a draft until you submit it for review.
+        </p>
+      </div>
+
       <div className="mt-6">
         <ListingForm
           action={saveListingAction.bind(null, null)}

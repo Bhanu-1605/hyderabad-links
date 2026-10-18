@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { ListingForm } from "@/components/ListingForm";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SubmitForReview } from "@/components/SubmitForReview";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { getCategories } from "@/lib/api";
 import { describeStatus, getMyListing } from "@/lib/owner-api";
 import { saveListingAction } from "../../../actions";
@@ -22,10 +23,10 @@ export default async function EditListingPage({ params, searchParams }: Props) {
   if (!result.ok) {
     if (result.status === 404) notFound(); // also what another owner's listing looks like
     return (
-      <main className="mx-auto max-w-2xl px-4 pt-8">
-        <p role="alert" className="text-red-700">
-          {result.message}
-        </p>
+      <main className="mx-auto max-w-3xl px-5 py-10 sm:px-8">
+        <EmptyState tone="error" mark="&#9888;" title="We could not load this listing">
+          <p>{result.message}</p>
+        </EmptyState>
       </main>
     );
   }
@@ -34,29 +35,43 @@ export default async function EditListingPage({ params, searchParams }: Props) {
   const canSubmit = listing.status === "draft" || listing.status === "rejected";
 
   return (
-    <main className="mx-auto max-w-2xl px-4 pt-8">
-      <Link href="/account/listings" className="text-sm text-brand-700 hover:underline">
-        Back to my listings
+    <main className="mx-auto max-w-3xl px-5 py-10 sm:px-8">
+      <Link href="/account/listings" className="text-sm font-bold text-brand-700 hover:underline">
+        <span aria-hidden="true">&larr;</span> Back to my listings
       </Link>
-      <div className="mt-2 flex items-start justify-between gap-3">
-        <h1 className="text-2xl font-bold">{listing.name}</h1>
-        <StatusBadge status={listing.status} />
+
+      <div className="mt-4 border-b border-line pb-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-black tracking-[0.22em] text-muted">
+              {listing.categoryName.toUpperCase()} &middot; {listing.localityName.toUpperCase()}
+            </p>
+            <h1 className="mt-1 text-3xl leading-tight font-black tracking-tight text-brand-800">{listing.name}</h1>
+          </div>
+          <StatusBadge status={listing.status} />
+        </div>
+        <p className="mt-2 text-muted">{describeStatus(listing.status).help}</p>
+
+        {listing.status === "active" ? (
+          <p className="mt-2">
+            <Link href={listing.url} className="text-sm font-black text-brand-700 hover:underline">
+              View public page <span aria-hidden="true">&rarr;</span>
+            </Link>
+          </p>
+        ) : null}
       </div>
-      <p className="mt-1 text-neutral-600">{describeStatus(listing.status).help}</p>
+
       {listing.status === "rejected" && listing.reviewNote ? (
-        <p className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-900">
-          <span className="font-semibold">What to change:</span> {listing.reviewNote}
+        <p className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <span className="font-black">What to change:</span> {listing.reviewNote}
         </p>
       ) : null}
-      {listing.status === "active" ? (
-        <p className="mt-1 text-sm">
-          <Link href={listing.url} className="text-brand-700 hover:underline">
-            View public page
-          </Link>
-        </p>
-      ) : null}
+
       {created ? (
-        <p role="status" className="mt-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-900">
+        <p
+          role="status"
+          className="mt-5 rounded-2xl border border-brand-200 bg-brand-50 px-5 py-4 text-sm text-brand-800"
+        >
           Draft saved. Add the address and a description, then submit it for review.
         </p>
       ) : null}

@@ -1,46 +1,70 @@
 import Link from "next/link";
+import { initialsOf } from "@/components/ui/BusinessCard";
 import type { SearchListing } from "@/lib/types";
 import { formatDistance, telHref, whatsappHref } from "@/lib/format";
 
+/**
+ * One business in a list of results. Shared by `/search` and the locality + category pages, so
+ * both show a business the same way.
+ *
+ * It shows only what the API actually returns. There is no rating, no opening hours and no logo
+ * here because none of those exist in the database yet - the monogram stands in for the logo.
+ */
 export function ListingCard({ listing }: { listing: SearchListing }) {
+  // Addresses usually already end with the area, so the area is only appended when it is missing.
+  const address = listing.addressLine?.trim();
+  const where =
+    !address ? listing.localityName
+    : address.toLowerCase().includes(listing.localityName.toLowerCase()) ? address
+    : `${address}, ${listing.localityName}`;
+
   return (
-    <li className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+    <li className="flex flex-col rounded-xl border border-line bg-white p-5 shadow-[0_8px_22px_#002a340b] transition hover:-translate-y-0.5 hover:shadow-[0_14px_30px_#002a3417]">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-base font-semibold">
-            <Link href={listing.url} className="hover:text-brand-700 hover:underline">
-              {listing.name}
-            </Link>
-          </h3>
-          <p className="mt-0.5 text-sm text-neutral-600">
-            {listing.categoryName} &middot; {listing.localityName}
-          </p>
-          {listing.addressLine ? <p className="mt-1 text-sm text-neutral-500">{listing.addressLine}</p> : null}
-        </div>
+        <span
+          aria-hidden="true"
+          className="grid h-14 w-14 shrink-0 place-items-center rounded-full border border-brand-200 bg-brand-50 text-lg font-black text-brand-700"
+        >
+          {initialsOf(listing.name)}
+        </span>
         {/* Only shown when the search knew where the visitor was. */}
         {listing.distanceMetres !== null ? (
-          <span className="shrink-0 rounded-full bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-900">
+          <span className="shrink-0 rounded-full bg-brand-50 px-3 py-1 text-xs font-extrabold text-brand-800">
             {formatDistance(listing.distanceMetres)}
           </span>
         ) : null}
       </div>
-      <div className="mt-3 flex gap-2">
-        <a
-          href={telHref(listing.phonePrimary)}
-          className="rounded-lg bg-brand-700 px-4 py-2 text-sm font-medium text-white hover:bg-brand-900"
-        >
-          Call
-        </a>
-        {listing.phoneWhatsapp ? (
+
+      <p className="mt-4 text-xs font-black tracking-[0.1em] text-muted uppercase">{listing.categoryName}</p>
+      <h3 className="mt-1 text-lg leading-snug font-black text-ink">
+        <Link href={listing.url} className="hover:text-brand-700">
+          {listing.name}
+        </Link>
+      </h3>
+      <p className="mt-1.5 text-sm text-muted">{where}</p>
+
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+        <div className="flex gap-2">
           <a
-            href={whatsappHref(listing.phoneWhatsapp)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium hover:bg-neutral-50"
+            href={telHref(listing.phonePrimary)}
+            className="rounded-full bg-brand-700 px-4 py-2 text-sm font-bold text-white hover:bg-brand-800"
           >
-            WhatsApp
+            Call
           </a>
-        ) : null}
+          {listing.phoneWhatsapp ? (
+            <a
+              href={whatsappHref(listing.phoneWhatsapp)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-full border border-brand-200 px-4 py-2 text-sm font-bold text-brand-700 hover:border-brand-700 hover:bg-brand-50"
+            >
+              WhatsApp
+            </a>
+          ) : null}
+        </div>
+        <Link href={listing.url} className="text-sm font-black text-brand-700 hover:underline">
+          View business <span aria-hidden="true">&rarr;</span>
+        </Link>
       </div>
     </li>
   );

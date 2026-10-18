@@ -2,8 +2,10 @@ import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 import Link from "next/link";
 import { JsonLd } from "@/components/JsonLd";
+import { initialsOf } from "@/components/ui/BusinessCard";
 import { getListing } from "@/lib/api";
 import { absoluteUrl, mapsHref, telHref, whatsappHref } from "@/lib/format";
+import type { ListingDetail } from "@/lib/types";
 
 type Props = { params: Promise<{ city: string; locality: string; category: string; slug: string }> };
 
@@ -13,9 +15,71 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   if (!listing) return { title: "Not found", robots: { index: false } };
   return {
     title: `${listing.name} - ${listing.categoryName} in ${listing.localityName}, ${listing.cityName}`,
-    description: listing.description ?? `${listing.name}, ${listing.categoryName} in ${listing.localityName}, ${listing.cityName}.`,
+    description:
+      listing.description ??
+      `${listing.name}, ${listing.categoryName} in ${listing.localityName}, ${listing.cityName}.`,
     alternates: { canonical: absoluteUrl(listing.url) },
   };
+}
+
+/**
+ * The facts panel.
+ *
+ * Only what the API actually returns is listed. The reference page also shows a rating, opening
+ * hours, a services list, languages spoken, a contact person and social links; **none of those
+ * have tables yet**, so they are left out rather than shown empty or invented. When those tables
+ * exist, this is the function to extend.
+ */
+function factsFor(listing: ListingDetail): { label: string; value: React.ReactNode }[] {
+  const facts: { label: string; value: React.ReactNode }[] = [];
+
+  if (listing.addressLine) {
+    facts.push({
+      label: "Address",
+      value: listing.pincode ? `${listing.addressLine} - ${listing.pincode}` : listing.addressLine,
+    });
+  }
+  facts.push({ label: "Area", value: `${listing.localityName}, ${listing.cityName}` });
+  facts.push({ label: "Category", value: listing.categoryName });
+  facts.push({
+    label: "Phone",
+    value: (
+      <a href={telHref(listing.phonePrimary)} className="text-brand-700 hover:underline">
+        {listing.phonePrimary}
+      </a>
+    ),
+  });
+  if (listing.phoneWhatsapp) {
+    facts.push({
+      label: "WhatsApp",
+      value: (
+        <a
+          href={whatsappHref(listing.phoneWhatsapp)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-brand-700 hover:underline"
+        >
+          {listing.phoneWhatsapp}
+        </a>
+      ),
+    });
+  }
+  if (listing.websiteUrl) {
+    facts.push({
+      label: "Website",
+      value: (
+        <a
+          href={listing.websiteUrl}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          className="text-brand-700 hover:underline"
+        >
+          Visit website <span aria-hidden="true">&#8599;</span>
+        </a>
+      ),
+    });
+  }
+  return facts;
 }
 
 export default async function ListingPage({ params }: Props) {
@@ -26,60 +90,109 @@ export default async function ListingPage({ params }: Props) {
   // The category in the URL must be the listing's primary category, otherwise 301 to the canonical URL (decision D4).
   if (category !== listing.categorySlug) permanentRedirect(listing.url);
 
+  const categoryPage = `/${listing.citySlug}/${listing.localitySlug}/${listing.categorySlug}`;
+  const facts = factsFor(listing);
+
   return (
-    <main className="mx-auto max-w-3xl px-4 pt-8">
-      <nav className="text-sm text-neutral-500">
-        <Link href={`/${listing.citySlug}/${listing.localitySlug}/${listing.categorySlug}`} className="hover:underline">
-          {listing.categoryName} in {listing.localityName}
-        </Link>
+    <main className="mx-auto max-w-4xl px-5 py-10 sm:px-8">
+      {/*
+        The crumbs follow the segments of the URL this page is at - city/locality/category/slug -
+        and every one of them is a page that exists: the area and the category resolve through
+        search, and the third crumb is the locality + category page itself.
+      */}
+      <nav aria-label="Breadcrumb">
+        <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
+          <li>
+            <Link href="/" className="font-bold text-brand-700 hover:underline">
+              Home
+            </Link>
+          </li>
+          <li aria-hidden="true">&rsaquo;</li>
+          <li>
+            <Link href={`/search?locality=${listing.localitySlug}`} className="font-bold text-brand-700 hover:underline">
+              {listing.localityName}
+            </Link>
+          </li>
+          <li aria-hidden="true">&rsaquo;</li>
+          <li>
+            <Link href={categoryPage} className="font-bold text-brand-700 hover:underline">
+              {listing.categoryName}
+            </Link>
+          </li>
+          <li aria-hidden="true">&rsaquo;</li>
+          <li aria-current="page" className="min-w-0 truncate">
+            {listing.name}
+          </li>
+        </ol>
       </nav>
 
-      <h1 className="mt-2 text-3xl font-bold tracking-tight">{listing.name}</h1>
-      <p className="mt-1 text-neutral-600">
-        {listing.categoryName} &middot; {listing.localityName}, {listing.cityName}
-      </p>
+      <article className="mt-6 rounded-2xl border border-line bg-white p-6 shadow-[0_12px_36px_#002a3410] sm:p-10">
+        <div
+          aria-hidden="true"
+          className="grid h-20 w-20 place-items-center rounded-full border border-brand-200 bg-brand-50 text-2xl font-black text-brand-700"
+        >
+          {initialsOf(listing.name)}
+        </div>
 
-      <div className="mt-5 flex flex-wrap gap-3">
-        <a href={telHref(listing.phonePrimary)} className="rounded-lg bg-brand-700 px-5 py-2.5 font-medium text-white hover:bg-brand-900">
-          Call {listing.phonePrimary}
-        </a>
-        {listing.phoneWhatsapp ? (
+        <p className="mt-6 text-[11px] font-black tracking-[0.22em] text-muted">HYDERABAD BUSINESS DIRECTORY</p>
+        <h1 className="mt-2 text-3xl leading-tight font-black tracking-tight text-brand-800 sm:text-4xl lg:text-5xl">
+          {listing.name}
+        </h1>
+        <p className="mt-2 font-black text-brand-700">
+          {listing.categoryName} &middot; {listing.localityName}
+        </p>
+
+        {listing.description ? (
+          <p className="mt-5 max-w-3xl text-base leading-[1.8] text-muted">{listing.description}</p>
+        ) : null}
+
+        <div className="mt-7 flex flex-wrap gap-3">
           <a
-            href={whatsappHref(listing.phoneWhatsapp)}
+            href={telHref(listing.phonePrimary)}
+            className="inline-flex items-center gap-2 rounded-full bg-brand-700 px-6 py-3 text-sm font-extrabold text-white hover:bg-brand-800"
+          >
+            Call {listing.phonePrimary}
+          </a>
+          {listing.phoneWhatsapp ? (
+            <a
+              href={whatsappHref(listing.phoneWhatsapp)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-white px-6 py-3 text-sm font-extrabold text-brand-700 hover:border-brand-700 hover:bg-brand-50"
+            >
+              WhatsApp
+            </a>
+          ) : null}
+          <a
+            href={mapsHref(listing.latitude, listing.longitude)}
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded-lg border border-neutral-300 bg-white px-5 py-2.5 font-medium hover:bg-neutral-50"
+            className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-white px-6 py-3 text-sm font-extrabold text-brand-700 hover:border-brand-700 hover:bg-brand-50"
           >
-            WhatsApp
+            Directions
           </a>
-        ) : null}
-        <a
-          href={mapsHref(listing.latitude, listing.longitude)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="rounded-lg border border-neutral-300 bg-white px-5 py-2.5 font-medium hover:bg-neutral-50"
-        >
-          Directions
-        </a>
-      </div>
+        </div>
 
-      <section className="mt-8 rounded-xl border border-neutral-200 bg-white p-5">
-        {listing.description ? <p className="text-neutral-700">{listing.description}</p> : null}
-        {listing.addressLine ? (
-          <p className="mt-3 text-neutral-600">
-            <span className="font-medium text-neutral-800">Address: </span>
-            {listing.addressLine}
-            {listing.pincode ? ` - ${listing.pincode}` : ""}
-          </p>
-        ) : null}
-        {listing.websiteUrl ? (
-          <p className="mt-2">
-            <a href={listing.websiteUrl} target="_blank" rel="noopener noreferrer nofollow" className="text-brand-700 hover:underline">
-              Visit website
-            </a>
-          </p>
-        ) : null}
-      </section>
+        <dl className="mt-8 grid gap-3.5 sm:grid-cols-2">
+          {facts.map((fact) => (
+            <div key={fact.label} className="min-w-0 rounded-lg bg-brand-50 px-4 py-3.5">
+              <dt className="text-[11px] font-black tracking-[0.12em] text-muted uppercase">{fact.label}</dt>
+              <dd className="mt-1 font-bold break-words text-ink">{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+
+        <p className="mt-6 text-xs text-muted">
+          Business information is provided by the listing owner. Please confirm the details directly
+          before making a purchase.
+        </p>
+      </article>
+
+      <p className="mt-8 text-center text-sm text-muted">
+        <Link href={categoryPage} className="font-bold text-brand-700 hover:underline">
+          More {listing.categoryName.toLowerCase()} in {listing.localityName}
+        </Link>
+      </p>
 
       <JsonLd
         data={{

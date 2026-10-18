@@ -1,97 +1,152 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { StatusBadge } from "@/components/StatusBadge";
+import { ButtonLink } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { describeStatus, listMyListings } from "@/lib/owner-api";
+import type { OwnerListing } from "@/lib/owner-api";
 
 export const metadata: Metadata = { title: "My listings" };
 
 const MAX_LISTINGS = 5; // same limit the API enforces
 
-type Props = { searchParams: Promise<{ submitted?: string }> };
+type Props = { searchParams: Promise<{ submitted?: string; welcome?: string }> };
+
+/**
+ * The counts across the top.
+ *
+ * Every one is worked out from the listings the API just returned - there is no view count, no
+ * rating and no blog here, because none of those exist in the database. The prototype's dashboard
+ * shows three such tiles permanently reading zero; showing a number nobody can ever change would
+ * be worse than showing nothing.
+ */
+function statusCounts(listings: OwnerListing[]) {
+  return [
+    { label: "Live", count: listings.filter((l) => l.status === "active").length },
+    { label: "In review", count: listings.filter((l) => l.status === "pending_review").length },
+    { label: "Drafts", count: listings.filter((l) => l.status === "draft").length },
+    { label: "Needs changes", count: listings.filter((l) => l.status === "rejected").length },
+  ];
+}
 
 export default async function MyListingsPage({ searchParams }: Props) {
-  const { submitted } = await searchParams;
+  const { submitted, welcome } = await searchParams;
   const result = await listMyListings();
-
-  const addButton = "rounded-lg bg-brand-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-900";
 
   if (!result.ok) {
     return (
-      <main className="mx-auto max-w-5xl px-4 pt-8">
-        <h1 className="text-2xl font-bold">My listings</h1>
-        <p role="alert" className="mt-4 text-red-700">
-          {result.message}
-        </p>
+      <main className="mx-auto max-w-6xl px-5 py-10 sm:px-8">
+        <h1 className="text-3xl font-black tracking-tight text-brand-800">My listings</h1>
+        <div className="mt-6">
+          <EmptyState tone="error" mark="&#9888;" title="We could not load your listings">
+            <p>{result.message}</p>
+          </EmptyState>
+        </div>
       </main>
     );
   }
 
   const listings = result.data;
+  const canAddMore = listings.length > 0 && listings.length < MAX_LISTINGS;
 
   return (
-    <main className="mx-auto max-w-5xl px-4 pt-8">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">My listings</h1>
-        {listings.length > 0 && listings.length < MAX_LISTINGS ? (
-          <Link href="/account/listings/new" className={addButton}>
-            Add a business
-          </Link>
-        ) : null}
+    <main className="mx-auto max-w-6xl px-5 py-10 sm:px-8">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-line pb-5">
+        <div>
+          <p className="text-[11px] font-black tracking-[0.22em] text-muted">BUSINESS OWNER</p>
+          <h1 className="mt-1 text-3xl font-black tracking-tight text-brand-800">My listings</h1>
+        </div>
+        {canAddMore ? <ButtonLink href="/account/listings/new">Add a business</ButtonLink> : null}
       </div>
 
+      {welcome ? (
+        <div role="status" className="mt-6 rounded-2xl border border-brand-200 bg-brand-50 px-5 py-4">
+          <p className="font-black text-brand-800">
+            <span aria-hidden="true">&#10003;</span> Your account is ready.
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            We saved your business below as a draft. Add the address and a description, then submit
+            it for review to go live.
+          </p>
+        </div>
+      ) : null}
+
       {submitted ? (
-        <p role="status" className="mt-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-900">
+        <p role="status" className="mt-6 rounded-2xl border border-brand-200 bg-brand-50 px-5 py-4 text-sm text-brand-800">
           Submitted for review. We will show your listing on the site once it is approved.
         </p>
       ) : null}
 
       {listings.length === 0 ? (
-        <div className="mt-6 rounded-xl border border-dashed border-neutral-300 bg-white p-8 text-center">
-          <h2 className="text-lg font-semibold">You have not added a business yet</h2>
-          <p className="mt-1 text-neutral-600">It takes a few minutes. Customers nearby will be able to call or WhatsApp you.</p>
-          <Link href="/account/listings/new" className={`${addButton} mt-5 inline-block`}>
-            Add your business
-          </Link>
+        <div className="mt-8">
+          <EmptyState
+            mark="&#8962;"
+            title="You have not added a business yet"
+            action={
+              <ButtonLink tone="cta" href="/account/listings/new">
+                Add your business <span aria-hidden="true">&rarr;</span>
+              </ButtonLink>
+            }
+          >
+            <p>It takes a few minutes. Customers nearby will be able to call or WhatsApp you.</p>
+          </EmptyState>
         </div>
       ) : (
-        <ul className="mt-6 grid gap-3">
-          {listings.map((listing) => (
-            <li key={listing.id} className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h2 className="text-base font-semibold">{listing.name}</h2>
-                  <p className="mt-0.5 text-sm text-neutral-600">
-                    {listing.categoryName} &middot; {listing.localityName}
-                  </p>
-                  <p className="mt-1 text-sm text-neutral-500">{describeStatus(listing.status).help}</p>
+        <>
+          <dl className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
+            {statusCounts(listings).map((stat) => (
+              <div key={stat.label} className="rounded-xl border border-line bg-white p-5 shadow-[0_8px_22px_#002a340b]">
+                <dt className="text-xs font-black tracking-[0.12em] text-muted uppercase">{stat.label}</dt>
+                <dd className="mt-1 text-3xl font-black text-brand-700">{stat.count}</dd>
+              </div>
+            ))}
+          </dl>
+
+          <ul className="mt-6 grid gap-5 lg:grid-cols-2">
+            {listings.map((listing) => (
+              <li
+                key={listing.id}
+                className="flex flex-col rounded-xl border border-line bg-white p-5 shadow-[0_8px_22px_#002a340b]"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="text-lg leading-snug font-black text-ink">{listing.name}</h2>
+                    <p className="mt-1 text-xs font-black tracking-[0.1em] text-muted uppercase">
+                      {listing.categoryName} &middot; {listing.localityName}
+                    </p>
+                  </div>
+                  <StatusBadge status={listing.status} />
                 </div>
-                <StatusBadge status={listing.status} />
-              </div>
-              {listing.status === "rejected" && listing.reviewNote ? (
-                <p className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-900">
-                  <span className="font-semibold">What to change:</span> {listing.reviewNote}
-                </p>
-              ) : null}
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Link
-                  href={`/account/listings/${listing.id}/edit`}
-                  className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium hover:bg-neutral-50"
-                >
-                  {listing.status === "draft" || listing.status === "rejected" ? "Edit and submit" : "Edit"}
-                </Link>
-                {listing.status === "active" ? (
-                  <Link href={listing.url} className="rounded-lg px-4 py-2 text-sm font-medium text-brand-700 hover:underline">
-                    View public page
-                  </Link>
+
+                <p className="mt-3 text-sm text-muted">{describeStatus(listing.status).help}</p>
+
+                {listing.status === "rejected" && listing.reviewNote ? (
+                  <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                    <span className="font-black">What to change:</span> {listing.reviewNote}
+                  </p>
                 ) : null}
-              </div>
-            </li>
-          ))}
-        </ul>
+
+                <div className="mt-auto flex flex-wrap items-center gap-3 border-t border-line pt-4">
+                  <Link
+                    href={`/account/listings/${listing.id}/edit`}
+                    className="rounded-full border border-brand-200 px-5 py-2 text-sm font-bold text-brand-700 hover:border-brand-700 hover:bg-brand-50"
+                  >
+                    {listing.status === "draft" || listing.status === "rejected" ? "Edit and submit" : "Edit"}
+                  </Link>
+                  {listing.status === "active" ? (
+                    <Link href={listing.url} className="text-sm font-black text-brand-700 hover:underline">
+                      View public page <span aria-hidden="true">&rarr;</span>
+                    </Link>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
 
       {listings.length >= MAX_LISTINGS ? (
-        <p className="mt-4 text-sm text-neutral-500">You have reached the limit of {MAX_LISTINGS} listings.</p>
+        <p className="mt-5 text-sm text-muted">You have reached the limit of {MAX_LISTINGS} listings.</p>
       ) : null}
     </main>
   );

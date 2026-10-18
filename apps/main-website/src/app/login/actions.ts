@@ -1,7 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { requestOtp, verifyOtp } from "@/lib/owner-api";
+import { getMeWithToken, requestOtp, verifyOtp } from "@/lib/owner-api";
 import { safeNextPath, setSessionCookies } from "@/lib/session";
 import type { LoginState } from "./state";
 
@@ -26,5 +26,11 @@ export async function loginAction(_previous: LoginState, formData: FormData): Pr
   if (!result.ok) return { step: "code", phone, error: result.message };
 
   await setSessionCookies(result.data);
+
+  // Verifying the code also creates the account, so a first-time owner arrives here signed in but
+  // with no profile. Send them to register before anywhere else they asked for.
+  const me = await getMeWithToken(result.data.accessToken);
+  if (me.ok && me.data.needsOnboarding) redirect("/onboarding");
+
   redirect(safeNextPath(String(formData.get("next") ?? "")));
 }

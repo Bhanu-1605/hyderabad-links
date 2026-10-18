@@ -59,6 +59,10 @@ assert and roll back, so they are safe to re-run:
 Get-Content database/checks/search_smoke.sql | docker exec -i hl-postgres psql -U hl_dev -d hyderabad_links -v ON_ERROR_STOP=1
 ```
 
+`database/checks/` currently holds `v0002_smoke`, `v0003_smoke`, `search_smoke`,
+`locality_search_smoke`, `onboarding_smoke` and `admin_moderation_smoke`. Note the `-i` on `docker exec`: without it psql gets no stdin and the
+script silently does nothing.
+
 The .NET integration tests deliberately need **no** database, because CI runs them without one.
 Anything that needs real rows belongs in `database/checks/`.
 

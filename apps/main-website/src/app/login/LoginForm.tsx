@@ -1,51 +1,65 @@
 "use client";
 
 import { useActionState } from "react";
+import { Field, describedBy, fieldClass } from "@/components/ui/Field";
 import { loginAction } from "./actions";
 import { initialLoginState } from "./state";
 
-const inputClass =
-  "w-full rounded-lg border border-neutral-300 px-3 py-2.5 text-base outline-none focus:border-brand-700 focus:ring-2 focus:ring-brand-100";
 const primaryButton =
-  "w-full rounded-lg bg-brand-700 px-5 py-2.5 text-base font-semibold text-white hover:bg-brand-900 disabled:opacity-60";
-const linkButton = "font-medium text-brand-700 underline-offset-2 hover:underline disabled:opacity-60";
+  "w-full cursor-pointer rounded-full bg-brand-700 px-5 py-3 text-base font-extrabold text-white hover:bg-brand-800 disabled:cursor-default disabled:opacity-60";
+const linkButton =
+  "cursor-pointer font-bold text-brand-700 underline-offset-2 hover:underline disabled:cursor-default disabled:opacity-60";
+
+/** Hides the middle of the number, as the prototype does: 98765 43210 becomes 98****3210. */
+function maskPhone(phone: string): string {
+  if (phone.length < 6) return phone;
+  return `${phone.slice(0, 2)}${"*".repeat(phone.length - 6)}${phone.slice(-4)}`;
+}
 
 export function LoginForm({ next, devHint }: { next: string; devHint: boolean }) {
   const [state, formAction, pending] = useActionState(loginAction, initialLoginState);
   const onCodeStep = state.step === "code";
 
   return (
-    <form action={formAction} className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
+    <form action={formAction} className="rounded-2xl border border-line bg-white p-6 shadow-[0_10px_30px_#002a3412]">
       <input type="hidden" name="next" value={next} />
 
       {onCodeStep ? (
         <>
           <input type="hidden" name="phone" value={state.phone} />
-          <p className="text-sm text-neutral-600">
-            Code sent to <span className="font-medium text-neutral-900">+91 {state.phone}</span>
+          <p className="text-center text-sm text-muted">
+            We sent a 6-digit code to{" "}
+            <strong className="font-bold text-ink">+91 {maskPhone(state.phone)}</strong>
           </p>
-          <label htmlFor="code" className="mt-4 block text-sm font-medium">
-            6-digit code
-          </label>
-          <input
-            id="code"
-            name="code"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={6}
-            autoFocus
-            required
-            className={`${inputClass} mt-1 tracking-[0.4em]`}
-          />
+
+          <div className="mt-5">
+            <Field id="code" label="6-digit code">
+              <input
+                id="code"
+                name="code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                autoFocus
+                required
+                placeholder="------"
+                aria-describedby={describedBy("code", false, false)}
+                className={`${fieldClass} text-center text-xl tracking-[0.6em] placeholder:tracking-[0.4em]`}
+              />
+            </Field>
+          </div>
+
           {devHint ? (
-            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
               Local development: no SMS is sent. Look for &quot;login code&quot; in the window running the API.
             </p>
           ) : null}
-          <button type="submit" name="intent" value="verify" disabled={pending} className={`${primaryButton} mt-4`}>
-            {pending ? "Checking..." : "Sign in"}
+
+          <button type="submit" name="intent" value="verify" disabled={pending} className={`${primaryButton} mt-5`}>
+            {pending ? "Checking..." : "Verify and sign in"}
           </button>
-          <div className="mt-3 flex flex-wrap gap-4 text-sm">
+
+          <div className="mt-4 flex flex-wrap justify-between gap-4 text-sm">
             <button type="submit" name="intent" value="request" formNoValidate disabled={pending} className={linkButton}>
               Send a new code
             </button>
@@ -56,33 +70,44 @@ export function LoginForm({ next, devHint }: { next: string; devHint: boolean })
         </>
       ) : (
         <>
-          <label htmlFor="phone-input" className="block text-sm font-medium">
-            Mobile number
-          </label>
-          <div className="mt-1 flex gap-2">
-            <span className="flex items-center rounded-lg border border-neutral-300 bg-neutral-50 px-3 text-base text-neutral-600">+91</span>
-            <input
-              id="phone-input"
-              name="phone"
-              type="tel"
-              inputMode="numeric"
-              autoComplete="tel-national"
-              defaultValue={state.phone}
-              placeholder="98765 43210"
-              autoFocus
-              required
-              className={inputClass}
-            />
-          </div>
-          <button type="submit" name="intent" value="request" disabled={pending} className={`${primaryButton} mt-4`}>
+          <Field
+            id="phone-input"
+            label="Mobile number"
+            help="We will text you a 6-digit code. Standard rates apply."
+          >
+            <div className="flex">
+              <span className="flex items-center rounded-l-lg border border-r-0 border-line bg-brand-50 px-3.5 text-base font-bold text-brand-800">
+                +91
+              </span>
+              <input
+                id="phone-input"
+                name="phone"
+                type="tel"
+                inputMode="numeric"
+                autoComplete="tel-national"
+                defaultValue={state.phone}
+                placeholder="98765 43210"
+                autoFocus
+                required
+                aria-describedby={describedBy("phone-input", false, true)}
+                className={`${fieldClass} rounded-l-none`}
+              />
+            </div>
+          </Field>
+
+          <button type="submit" name="intent" value="request" disabled={pending} className={`${primaryButton} mt-5`}>
             {pending ? "Sending..." : "Send code"}
           </button>
         </>
       )}
 
-      {state.notice && !state.error ? <p className="mt-3 text-sm text-neutral-600">{state.notice}</p> : null}
+      {state.notice && !state.error ? (
+        <p role="status" className="mt-4 rounded-lg bg-brand-50 px-3 py-2 text-sm text-brand-800">
+          {state.notice}
+        </p>
+      ) : null}
       {state.error ? (
-        <p role="alert" className="mt-3 text-sm text-red-700">
+        <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-800">
           {state.error}
         </p>
       ) : null}

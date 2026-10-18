@@ -30,7 +30,46 @@ export type OwnerListing = {
   url: string;
 };
 
-export type OwnerProfile = { id: number; phone: string; name: string | null };
+/** `needsOnboarding` is the API's own rule (an owner with no name has not registered yet), not ours. */
+export type OwnerProfile = {
+  id: number;
+  phone: string;
+  name: string | null;
+  email: string | null;
+  needsOnboarding: boolean;
+};
+
+/**
+ * The dashboard's figures. Every number is counted from the owner's own rows; there is deliberately
+ * nothing here about views, leads or ratings, because no table records them.
+ */
+export type OwnerOverview = {
+  listings: {
+    total: number;
+    active: number;
+    pendingReview: number;
+    draft: number;
+    rejected: number;
+    suspended: number;
+  };
+  profile: {
+    completed: number;
+    total: number;
+    steps: { key: string; label: string; done: boolean }[];
+  };
+};
+
+/** What the one-time registration form sends. */
+export type OnboardingInput = {
+  name: string;
+  email: string;
+  businessName: string;
+  localitySlug: string;
+  categorySlug: string;
+};
+
+/** `created` is false when the request was a repeat and the account already existed. */
+export type OnboardingResult = { name: string; email: string; listingId: number | null; created: boolean };
 
 /** What the listing form sends. The API trims and validates everything again. */
 export type ListingFormInput = {
@@ -124,6 +163,20 @@ export const logoutSession = (refreshToken: string) =>
 
 // ---- signed-in owner
 export const getMe = () => authed<OwnerProfile>("/api/v1/me");
+
+/**
+ * Reads the profile with a token passed in directly, for the moment just after sign-in when the
+ * cookie has been set but we would rather not depend on reading back what we only just wrote.
+ */
+export const getMeWithToken = (accessToken: string) => send<OwnerProfile>("/api/v1/me", {}, accessToken);
+
+export const onboard = (input: OnboardingInput) =>
+  authed<OnboardingResult>("/api/v1/me/onboarding", { method: "POST", body: json(input) });
+export const getOverview = () => authed<OwnerOverview>("/api/v1/me/overview");
+
+export const updateProfile = (input: { name: string; email: string }) =>
+  authed<{ phone: string; name: string; email: string }>("/api/v1/me/profile", { method: "PUT", body: json(input) });
+
 export const listMyListings = () => authed<OwnerListing[]>("/api/v1/me/listings");
 export const getMyListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}`);
 export const createListing = (input: ListingFormInput) =>

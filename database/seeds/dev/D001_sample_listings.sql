@@ -110,3 +110,15 @@ JOIN localities lo ON lo.slug = v.locality_slug
 JOIN listings li ON li.locality_id = lo.id AND li.slug = v.listing_slug
 JOIN categories c ON c.slug = v.category_slug
 ON CONFLICT DO NOTHING;
+
+-- One sample listing carries a WhatsApp number and a website, so the optional rows on the listing
+-- detail page and the WhatsApp button on the result cards can actually be seen while developing.
+-- Without this every sample listing has only a phone number, and those branches never render.
+-- example.com is reserved for documentation, so this points at nobody's real site.
+UPDATE listings li
+SET phone_whatsapp = '+919999010025',
+    website_url = 'https://example.com/sample-brew-and-bites'
+FROM localities lo
+WHERE lo.id = li.locality_id
+  AND lo.slug = 'madhapur'
+  AND li.slug = 'sample-brew-and-bites-cafe-madhapur';

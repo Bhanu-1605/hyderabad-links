@@ -1,3 +1,4 @@
+using BusinessDirectory.Api.Listings;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -9,6 +10,18 @@ public static class PublicDirectoryEndpoints
     public sealed record CityDto(string Slug, string Name, string State);
 
     public sealed record LocalityDto(string Slug, string Name, double Latitude, double Longitude);
+
+    /// <summary>
+    /// One locality suggestion. The city name and state come along so similarly named places can be
+    /// told apart once there is a second city.
+    /// </summary>
+    public sealed record LocalitySuggestionDto(string Slug, string Name, string CityName, string State);
+
+    /// <summary>
+    /// The known locality closest to a point, with how far away it is, so the caller can say when
+    /// the nearest area we know about is not really where the visitor is standing.
+    /// </summary>
+    public sealed record NearestLocalityDto(string Slug, string Name, string CityName, string State, int DistanceMetres);
 
     public sealed record SubCategoryDto(string Slug, string Name, string[] SearchTerms);
 
@@ -51,6 +64,8 @@ public static class PublicDirectoryEndpoints
     {
         group.MapGet("/cities", GetCities);
         group.MapGet("/cities/{citySlug}/localities", GetLocalities);
+        group.MapGet("/localities/search", SearchLocalities);
+        group.MapGet("/localities/nearest", GetNearestLocality);
         group.MapGet("/categories", GetCategories);
         group.MapGet("/listings/nearby", GetNearby);
         group.MapGet("/listings/{citySlug}/{localitySlug}/{slug}", GetListing);
@@ -85,6 +100,106 @@ public static class PublicDirectoryEndpoints
             localities.Add(new LocalityDto(reader.GetString(0), reader.GetString(1), reader.GetDouble(2), reader.GetDouble(3)));
         }
         return localities.Count == 0 ? Results.NotFound() : Results.Ok(localities);
+    }
+
+    /// <summary>
+    /// Partial, case-insensitive locality lookup for the location autocomplete on the websites.
+    ///
+    /// The ranking is deliberate: names beginning with what was typed come first ("gachi" ->
+    /// Gachibowli), then names containing it anywhere ("colony" -> KPHB Colony), then trigram
+    /// similarity so a misspelling still lands ("patan" -> Patancheru). The existing GIN trigram
+    /// index localities_name_trgm_idx serves both the ILIKE patterns and the % similarity operator.
+    /// </summary>
+    private static async Task<IResult> SearchLocalities(
+        string? q,
+        string? city,
+        int? limit,
+        NpgsqlDataSource db,
+        CancellationToken ct)
+    {
+        var query = LocalitySearchQuery.TryCreate(q, city, limit, out var error);
+        if (query is null)
+        {
+            return Results.Problem(error, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        await using var command = db.CreateCommand(
+            @"SELECT l.slug, l.name, c.name, c.state
+              FROM localities l
+              JOIN cities c ON c.id = l.city_id
+              WHERE l.is_active AND c.is_active
+                AND (@city::text IS NULL OR c.slug = @city)
+                AND (l.name ILIKE @contains OR l.name % @text)
+              ORDER BY CASE WHEN l.name ILIKE @prefix THEN 0
+                            WHEN l.name ILIKE @contains THEN 1
+                            ELSE 2 END,
+                       similarity(l.name, @text) DESC,
+                       l.name
+              LIMIT @max");
+        command.Parameters.Add(new NpgsqlParameter("city", NpgsqlDbType.Text) { Value = (object?)query.CitySlug ?? DBNull.Value });
+        command.Parameters.AddWithValue("text", query.Text);
+        command.Parameters.AddWithValue("prefix", query.PrefixPattern);
+        command.Parameters.AddWithValue("contains", query.ContainsPattern);
+        command.Parameters.AddWithValue("max", query.Limit);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var suggestions = new List<LocalitySuggestionDto>();
+        while (await reader.ReadAsync(ct))
+        {
+            suggestions.Add(new LocalitySuggestionDto(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3)));
+        }
+
+        // An empty list rather than 404: "nothing matched what you typed" is a normal answer here.
+        return Results.Ok(suggestions);
+    }
+
+    /// <summary>
+    /// Resolves coordinates to the closest locality we know about, using the existing
+    /// localities_center_gix index (&lt;-&gt; is the indexed nearest-neighbour operator).
+    ///
+    /// This stands in for a paid reverse geocoder: decision D14's maps provider is still open, and
+    /// for the localities we hold this needs no provider and no key. The distance comes back so the
+    /// caller can warn the visitor when the nearest known area is far from where they are.
+    /// </summary>
+    private static async Task<IResult> GetNearestLocality(
+        double? lat,
+        double? lng,
+        NpgsqlDataSource db,
+        CancellationToken ct)
+    {
+        var query = NearestLocalityQuery.TryCreate(lat, lng, out var error);
+        if (query is null)
+        {
+            return Results.Problem(error, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        await using var command = db.CreateCommand(
+            @"SELECT l.slug, l.name, c.name, c.state, ST_Distance(l.center, p.pt)
+              FROM (SELECT ST_SetSRID(ST_MakePoint(@lng, @lat), 4326)::geography AS pt) p
+              JOIN localities l ON l.is_active
+              JOIN cities c ON c.id = l.city_id AND c.is_active
+              ORDER BY l.center <-> p.pt
+              LIMIT 1");
+        command.Parameters.AddWithValue("lat", query.Latitude);
+        command.Parameters.AddWithValue("lng", query.Longitude);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            // Only reachable if there are no active localities at all.
+            return Results.NotFound();
+        }
+
+        return Results.Ok(new NearestLocalityDto(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            (int)Math.Round(reader.GetDouble(4))));
     }
 
     private static async Task<IResult> GetCategories(NpgsqlDataSource db, CancellationToken ct)

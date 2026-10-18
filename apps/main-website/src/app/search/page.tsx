@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ListingCard } from "@/components/ListingCard";
 import { Pagination } from "@/components/Pagination";
 import { SearchFilters } from "@/components/SearchFilters";
+import { ActiveFilters, type ActiveFilter } from "@/components/ui/ActiveFilters";
+import { ButtonLink } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { getCategories, getLocalities, searchListings } from "@/lib/api";
 import { DEFAULT_CITY, DEFAULT_CITY_NAME } from "@/lib/brand";
 import { findCategory } from "@/lib/categories";
@@ -56,6 +60,19 @@ function headingFor(criteria: SearchCriteria, categoryName: string | null, local
   return `${what} in ${where}`.replace(" in near you", " near you");
 }
 
+/** The same search with one parameter dropped. Used by the "remove this filter" chips. */
+function searchWithout(raw: RawParams, ...drop: (keyof RawParams)[]): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(raw)) {
+    if (value === undefined || value === "") continue;
+    if (drop.includes(key as keyof RawParams)) continue;
+    if (key === "page") continue; // removing a filter starts again at the first page
+    query.set(key, value);
+  }
+  const text = query.toString();
+  return text ? `/search?${text}` : "/search";
+}
+
 export default async function SearchPage({ searchParams }: Props) {
   const raw = await searchParams;
   const criteria = toCriteria(raw);
@@ -75,38 +92,99 @@ export default async function SearchPage({ searchParams }: Props) {
   const categoryName = criteria.category ? findCategory(tree, criteria.category)?.name ?? null : null;
   const localityName = criteria.locality ? areas.find((a) => a.slug === criteria.locality)?.name ?? null : null;
 
-  return (
-    <main className="mx-auto max-w-5xl px-4 pt-8">
-      <SearchFilters criteria={criteria} categories={tree} localities={areas} />
+  // What is narrowing the results right now, each with a way to drop just that one.
+  const filters: ActiveFilter[] = [];
+  if (criteria.q) filters.push({ kind: "Keyword", label: criteria.q, removeHref: searchWithout(raw, "q") });
+  if (criteria.category) {
+    filters.push({
+      kind: "Category",
+      label: categoryName ?? criteria.category,
+      removeHref: searchWithout(raw, "category"),
+    });
+  }
+  if (criteria.locality) {
+    filters.push({
+      kind: "Area",
+      label: localityName ?? criteria.locality,
+      removeHref: searchWithout(raw, "locality"),
+    });
+  }
+  if (criteria.lat !== undefined) {
+    filters.push({
+      kind: "Area",
+      label: "Near my location",
+      // Sorting by distance cannot outlive the coordinates it sorts by.
+      removeHref: searchWithout(raw, "lat", "lng", "radiusKm", "sort"),
+    });
+  }
+  if (criteria.sort === "name") {
+    filters.push({ kind: "Sorted by", label: "Name (A to Z)", removeHref: searchWithout(raw, "sort") });
+  }
 
-      <h1 className="mt-8 text-2xl font-bold">{headingFor(criteria, categoryName, localityName)}</h1>
+  return (
+    <main className="mx-auto max-w-[1500px] px-5 pt-10 pb-20 sm:px-8 lg:px-12">
+      <div className="mx-auto max-w-3xl text-center">
+        <p className="text-[11px] font-black tracking-[0.22em] text-brand-500">HYDERABAD, CONNECTED</p>
+        <h1 className="mt-2 text-3xl leading-tight font-black tracking-tight text-brand-700 sm:text-4xl lg:text-5xl">
+          {headingFor(criteria, categoryName, localityName)}
+        </h1>
+        <p className="mt-3 text-muted">Only businesses approved by our team appear in these results.</p>
+      </div>
+
+      <div className="mx-auto mt-8 max-w-4xl">
+        <SearchFilters criteria={criteria} categories={tree} localityName={localityName} />
+      </div>
+
+      {filters.length > 0 ? (
+        <div className="mx-auto mt-5 max-w-4xl">
+          <ActiveFilters filters={filters} clearAllHref="/search" />
+        </div>
+      ) : null}
 
       {failed ? (
-        <div role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4">
-          <p className="font-medium text-red-900">We could not load results just now.</p>
-          <p className="mt-1 text-sm text-red-800">Please try the search again in a moment.</p>
+        <div className="mt-10">
+          <EmptyState tone="error" mark="&#9888;" title="We could not load results just now">
+            <p>The directory is temporarily unreachable. Please try the search again in a moment.</p>
+          </EmptyState>
         </div>
       ) : results && results.total === 0 ? (
-        <div className="mt-4 rounded-xl border border-neutral-200 bg-white p-6">
-          <p className="font-medium">No businesses matched this search.</p>
-          <p className="mt-1 text-sm text-neutral-600">
-            Try a different keyword, pick a wider category, or choose &ldquo;All areas&rdquo;.
-          </p>
+        <div className="mt-10">
+          <EmptyState
+            mark="&#8981;"
+            title="No businesses matched this search"
+            action={
+              <ButtonLink tone="cta" href="/login">
+                List your business <span aria-hidden="true">&rarr;</span>
+              </ButtonLink>
+            }
+          >
+            <p>
+              Try a different keyword, pick a wider category, or clear the area filter. Only approved listings appear
+              in public results.
+            </p>
+          </EmptyState>
         </div>
       ) : results ? (
         <>
-          <p className="mt-1 text-sm text-neutral-500">
-            {results.total} {results.total === 1 ? "business" : "businesses"} found
+          <p className="mt-8 text-sm text-muted" aria-live="polite">
+            <strong className="text-lg font-black text-brand-700">{results.total}</strong>{" "}
+            {results.total === 1 ? "business" : "businesses"} found
             {criteria.sort === "distance" ? ", closest first" : ""}
           </p>
 
           {results.items.length === 0 ? (
             // A page number past the end: the total above still tells the visitor what exists.
-            <p className="mt-4 text-neutral-600">
-              This page is empty. Go back to <a href="/search?page=1" className="text-brand-700 underline">the first page</a>.
-            </p>
+            <div className="mt-6">
+              <EmptyState
+                mark="&#8644;"
+                title="This page is past the end"
+                action={<ButtonLink href={searchWithout(raw)}>Back to the first page</ButtonLink>}
+              >
+                <p>There are results for this search, just not this far in.</p>
+              </EmptyState>
+            </div>
           ) : (
-            <ul className="mt-4 grid gap-3">
+            <ul className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
               {results.items.map((listing) => (
                 <ListingCard key={listing.url} listing={listing} />
               ))}
@@ -119,6 +197,14 @@ export default async function SearchPage({ searchParams }: Props) {
             params={raw as Record<string, string | undefined>}
             basePath="/search"
           />
+
+          <p className="mt-10 text-center text-sm text-muted">
+            Cannot find a business?{" "}
+            <Link href="/login" className="font-bold text-brand-700 hover:underline">
+              Add it to Hyderabad Links
+            </Link>
+            .
+          </p>
         </>
       ) : null}
     </main>

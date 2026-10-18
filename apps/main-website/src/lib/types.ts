@@ -5,6 +5,12 @@ export type SubCategory = { slug: string; name: string; searchTerms: string[] };
 export type Category = { slug: string; name: string; children: SubCategory[] };
 export type Locality = { slug: string; name: string; latitude: number; longitude: number };
 
+/** One row from /api/v1/public/localities/search, for the location autocomplete. */
+export type LocalitySuggestion = { slug: string; name: string; cityName: string; state: string };
+
+/** /api/v1/public/localities/nearest: the known area closest to a point, and how far away it is. */
+export type NearestLocality = LocalitySuggestion & { distanceMetres: number };
+
 export type ListingDetail = {
   slug: string;
   name: string;

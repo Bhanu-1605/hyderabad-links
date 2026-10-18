@@ -1,13 +1,17 @@
-import type { Category, Locality, SearchCriteria } from "@/lib/types";
+import { LocalityCombobox } from "@/components/LocalityCombobox";
+import type { Category, SearchCriteria } from "@/lib/types";
 
 type Props = {
   criteria: SearchCriteria;
   categories: Category[];
-  localities: Locality[];
+  /** The name of the area already filtered on, so the picker can show it. Null when there is none. */
+  localityName: string | null;
 };
 
-const inputClass =
-  "w-full rounded-lg border border-neutral-300 bg-white px-3 py-2.5 text-base outline-none focus:border-brand-700 focus:ring-2 focus:ring-brand-100";
+const fieldClass =
+  "w-full rounded-lg border border-line bg-white px-3 py-2.5 text-base text-ink outline-none focus:border-brand-700 focus:ring-2 focus:ring-brand-100";
+
+const labelClass = "block text-xs font-black tracking-[0.12em] text-muted uppercase";
 
 /**
  * Keyword and filter controls for the search page.
@@ -15,12 +19,16 @@ const inputClass =
  * A plain GET form, so every filter ends up in the URL (shareable, bookmarkable, and readable by
  * the server component that renders the results). It needs no client-side JavaScript to work.
  */
-export function SearchFilters({ criteria, categories, localities }: Props) {
+export function SearchFilters({ criteria, categories, localityName }: Props) {
   // Sorting by distance is only offered when the URL carries coordinates, because the API rejects it otherwise.
   const hasCoordinates = criteria.lat !== undefined && criteria.lng !== undefined;
 
   return (
-    <form method="GET" action="/search" className="rounded-2xl bg-white p-3 shadow-md sm:p-4">
+    <form
+      method="GET"
+      action="/search"
+      className="rounded-2xl border border-line bg-white p-4 shadow-[0_8px_28px_#002a3412] sm:p-5"
+    >
       {/* Changing a filter starts again at the first page. */}
       <input type="hidden" name="page" value="1" />
       {hasCoordinates ? (
@@ -43,23 +51,28 @@ export function SearchFilters({ criteria, categories, localities }: Props) {
             defaultValue={criteria.q ?? ""}
             placeholder="Business name, service or keyword"
             autoComplete="off"
-            className={inputClass}
+            className={fieldClass}
           />
         </div>
         <button
           type="submit"
-          className="rounded-lg bg-brand-700 px-6 py-2.5 text-base font-semibold text-white hover:bg-brand-900"
+          className="cursor-pointer rounded-full bg-brand-700 px-7 py-2.5 text-base font-extrabold text-white hover:bg-brand-800"
         >
           Search
         </button>
       </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid gap-4 sm:grid-cols-3">
         <div>
-          <label htmlFor="search-category" className="block text-sm font-medium text-neutral-700">
+          <label htmlFor="search-category" className={labelClass}>
             Category
           </label>
-          <select id="search-category" name="category" defaultValue={criteria.category ?? ""} className={`mt-1 ${inputClass}`}>
+          <select
+            id="search-category"
+            name="category"
+            defaultValue={criteria.category ?? ""}
+            className={`mt-1.5 ${fieldClass}`}
+          >
             <option value="">All categories</option>
             {categories.map((parent) => (
               <optgroup key={parent.slug} label={parent.name}>
@@ -74,25 +87,22 @@ export function SearchFilters({ criteria, categories, localities }: Props) {
           </select>
         </div>
 
-        <div>
-          <label htmlFor="search-locality" className="block text-sm font-medium text-neutral-700">
-            Area
-          </label>
-          <select id="search-locality" name="locality" defaultValue={criteria.locality ?? ""} className={`mt-1 ${inputClass}`}>
-            <option value="">All areas</option>
-            {localities.map((locality) => (
-              <option key={locality.slug} value={locality.slug}>
-                {locality.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/*
+          The one client-side island in this form. It submits the chosen locality's slug in a hidden
+          field, so the form stays a plain GET form and every filter still ends up in the URL.
+        */}
+        <LocalityCombobox
+          name="locality"
+          labelClassName={labelClass}
+          initialSlug={criteria.locality ?? undefined}
+          initialName={localityName ?? undefined}
+        />
 
         <div>
-          <label htmlFor="search-sort" className="block text-sm font-medium text-neutral-700">
+          <label htmlFor="search-sort" className={labelClass}>
             Sort by
           </label>
-          <select id="search-sort" name="sort" defaultValue={criteria.sort ?? ""} className={`mt-1 ${inputClass}`}>
+          <select id="search-sort" name="sort" defaultValue={criteria.sort ?? ""} className={`mt-1.5 ${fieldClass}`}>
             <option value="">Best match</option>
             {hasCoordinates ? <option value="distance">Nearest first</option> : null}
             <option value="name">Name (A to Z)</option>
