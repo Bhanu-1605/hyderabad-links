@@ -28,6 +28,16 @@ public static class AdminAccess
     /// <summary>Authorization policy name. It pins the scheme, so an owner token cannot satisfy it.</summary>
     public const string Policy = "Admin";
 
+    /// <summary>
+    /// The halfway states of an admin sign-in. Each has its own scheme and policy so that a token
+    /// issued after the password but before the authenticator code reaches only the endpoint it is
+    /// meant for — and fails audience validation on every real admin route.
+    /// </summary>
+    public const string MfaScheme = "AdminMfaBearer";
+    public const string MfaPolicy = "AdminMfa";
+    public const string EnrollScheme = "AdminEnrollBearer";
+    public const string EnrollPolicy = "AdminEnroll";
+
     private const string LoadSql =
         @"SELECT au.email,
                  au.display_name,

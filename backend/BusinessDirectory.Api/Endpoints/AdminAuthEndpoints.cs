@@ -24,6 +24,13 @@ public static class AdminAuthEndpoints
     public sealed record SessionDto(string AccessToken, string RefreshToken, int ExpiresInSeconds);
 
     /// <summary>
+    /// What a correct password alone earns: not a session, but a short-lived token for the second
+    /// step. <paramref name="Stage"/> is "mfa" when the admin has an authenticator and "enroll" when
+    /// they must set one up first, which is every admin's first sign-in.
+    /// </summary>
+    public sealed record MfaRequiredDto(string Stage, string MfaToken, int ExpiresInSeconds);
+
+    /// <summary>
     /// One message for an unknown email, a wrong password and a locked or disabled account. It tells a
     /// locked-out admin enough to ask for help without telling an attacker which addresses exist.
     /// </summary>
@@ -62,8 +69,10 @@ public static class AdminAuthEndpoints
         string status;
         int failedCount;
         bool locked;
+        bool totpEnabled;
         await using (var find = new NpgsqlCommand(
-            @"SELECT id, password_hash, status, failed_login_count, COALESCE(locked_until > now(), false)
+            @"SELECT id, password_hash, status, failed_login_count, COALESCE(locked_until > now(), false),
+                     totp_enabled_at IS NOT NULL
               FROM admin_users
               WHERE email = @email
               FOR UPDATE", conn, tx))
@@ -83,6 +92,7 @@ public static class AdminAuthEndpoints
             status = reader.GetString(2);
             failedCount = reader.GetInt32(3);
             locked = reader.GetBoolean(4);
+            totpEnabled = reader.GetBoolean(5);
         }
 
         // An invited account has no password yet, and a disabled one must not sign in. Both answer like a wrong password.
@@ -102,7 +112,9 @@ public static class AdminAuthEndpoints
                       WHERE id = @id", conn, tx);
                 bump.Parameters.AddWithValue("id", adminId);
                 bump.Parameters.AddWithValue("max", settings.AdminMaxFailedLogins);
-                bump.Parameters.AddWithValue("lockMinutes", (double)settings.AdminLockoutMinutes);
+                // make_interval's `mins` parameter is an integer; passing a double makes Postgres fail to
+                // resolve the function, which is why a wrong password used to answer 500.
+                bump.Parameters.AddWithValue("lockMinutes", settings.AdminLockoutMinutes);
                 await bump.ExecuteNonQueryAsync(ct);
             }
 
@@ -121,20 +133,18 @@ public static class AdminAuthEndpoints
             await reset.ExecuteNonQueryAsync(ct);
         }
 
-        var refreshToken = TokenService.NewRefreshToken();
-        await using (var session = new NpgsqlCommand(
-            @"INSERT INTO admin_sessions (admin_user_id, refresh_token_hash, expires_at, ip, user_agent)
-              VALUES (@admin, @hash, now() + make_interval(days => @days), @ip, @ua)", conn, tx))
-        {
-            AddSessionParameters(session, adminId, refreshToken, settings, http);
-            await session.ExecuteNonQueryAsync(ct);
-        }
+        // The password is right, and that is all. No session row and no admin token are created
+        // here: MFA is mandatory, so the sign-in is only half done. What comes back reaches the
+        // second step and nothing else, because it carries a different audience.
+        var stage = totpEnabled ? "mfa" : "enroll";
+        var (mfaToken, mfaExpiresIn) = totpEnabled
+            ? tokens.CreateAdminMfaToken(adminId)
+            : tokens.CreateAdminEnrollToken(adminId);
 
-        await WriteAudit(conn, tx, adminId, "admin.signed_in", http, details: null, ct);
+        await WriteAudit(conn, tx, adminId, "admin.password_verified", http, new { stage }, ct);
         await tx.CommitAsync(ct);
 
-        var (accessToken, expiresIn) = tokens.CreateAdminAccessToken(adminId);
-        return Results.Ok(new SessionDto(accessToken, refreshToken, expiresIn));
+        return Results.Ok(new MfaRequiredDto(stage, mfaToken, mfaExpiresIn));
     }
 
     // ------------------------------------------------------------------ rotate the refresh token
@@ -159,8 +169,10 @@ public static class AdminAuthEndpoints
         Guid familyId;
         bool expired;
         bool alreadyUsed;
+        DateTime? lastMfaAt;
         await using (var find = new NpgsqlCommand(
-            @"SELECT id, admin_user_id, family_id, expires_at <= now(), (rotated_at IS NOT NULL OR revoked_at IS NOT NULL)
+            @"SELECT id, admin_user_id, family_id, expires_at <= now(), (rotated_at IS NOT NULL OR revoked_at IS NOT NULL),
+                     last_mfa_at
               FROM admin_sessions
               WHERE refresh_token_hash = @hash
               FOR UPDATE", conn, tx))
@@ -176,6 +188,14 @@ public static class AdminAuthEndpoints
             familyId = reader.GetGuid(2);
             expired = reader.GetBoolean(3);
             alreadyUsed = reader.GetBoolean(4);
+            lastMfaAt = reader.IsDBNull(5) ? null : reader.GetDateTime(5);
+        }
+
+        // Every session is created by the MFA step, so last_mfa_at is always set. Checking it anyway
+        // means a row that somehow appeared without MFA can never be refreshed into a live session.
+        if (lastMfaAt is null)
+        {
+            return Results.Unauthorized();
         }
 
         if (alreadyUsed)
@@ -214,11 +234,14 @@ public static class AdminAuthEndpoints
 
         var newRefreshToken = TokenService.NewRefreshToken();
         await using (var insert = new NpgsqlCommand(
-            @"INSERT INTO admin_sessions (admin_user_id, family_id, refresh_token_hash, expires_at, ip, user_agent)
-              VALUES (@admin, @family, @hash, now() + make_interval(days => @days), @ip, @ua)", conn, tx))
+            @"INSERT INTO admin_sessions (admin_user_id, family_id, refresh_token_hash, expires_at, last_mfa_at, ip, user_agent)
+              VALUES (@admin, @family, @hash, now() + make_interval(days => @days), @lastMfa, @ip, @ua)", conn, tx))
         {
             AddSessionParameters(insert, adminId, newRefreshToken, settings, http);
             insert.Parameters.AddWithValue("family", familyId);
+            // Carried forward, not reset: refreshing is not a second authentication, so it must
+            // neither re-stamp the MFA time nor quietly drop it.
+            insert.Parameters.AddWithValue("lastMfa", lastMfaAt.Value);
             await insert.ExecuteNonQueryAsync(ct);
         }
 
@@ -263,7 +286,8 @@ public static class AdminAuthEndpoints
         return trimmed;
     }
 
-    private static void AddSessionParameters(NpgsqlCommand command, long adminId, string refreshToken, AuthSettings settings, HttpContext http)
+    /// <summary>Shared with <see cref="AdminMfaEndpoints"/>, which is where sessions are created now.</summary>
+    internal static void AddSessionParameters(NpgsqlCommand command, long adminId, string refreshToken, AuthSettings settings, HttpContext http)
     {
         var userAgent = http.Request.Headers.UserAgent.ToString();
         if (userAgent.Length > 300)
@@ -283,7 +307,7 @@ public static class AdminAuthEndpoints
     /// Security events on the admin accounts themselves. A failed sign-in for an unknown address has no
     /// admin to attribute it to, so it is recorded as a system event. Passwords are never part of details.
     /// </summary>
-    private static async Task WriteAudit(
+    internal static async Task WriteAudit(
         NpgsqlConnection conn,
         NpgsqlTransaction tx,
         long? actorAdminId,

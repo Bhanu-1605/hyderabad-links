@@ -18,8 +18,25 @@ public sealed class AuthSettings
     /// </summary>
     public const string AdminAudience = "admin";
 
+    /// <summary>
+    /// The audience a token carries between the password step and the TOTP step. It is deliberately
+    /// *not* <see cref="AdminAudience"/>: the admin scheme validates the audience, so a half-finished
+    /// sign-in fails validation on every admin route rather than depending on a check somewhere in
+    /// the handler. That is what stops a password-only session acting.
+    /// </summary>
+    public const string AdminMfaAudience = "admin-mfa";
+
+    /// <summary>
+    /// The same idea for an admin who has no authenticator yet: this audience reaches the enrollment
+    /// endpoints and nothing else.
+    /// </summary>
+    public const string AdminEnrollAudience = "admin-enroll";
+
     public required byte[] JwtKey { get; init; }
     public required byte[] OtpKey { get; init; }
+
+    /// <summary>Encrypts `admin_users.totp_secret_encrypted`. See <see cref="TotpSecrets"/> for why.</summary>
+    public required byte[] TotpKey { get; init; }
     public string Issuer { get; init; } = "hyderabadlinks-api";
     public string Audience { get; init; } = OwnerAudience;
     public int AccessTokenMinutes { get; init; } = 15;
@@ -37,6 +54,15 @@ public sealed class AuthSettings
     public int AdminMaxFailedLogins { get; init; } = 5;
     public int AdminLockoutMinutes { get; init; } = 15;
 
+    /// <summary>
+    /// How long the half-finished sign-in lasts. Short on purpose: it only has to cover reading a
+    /// code off a phone, and it is the window in which a stolen password is one factor short.
+    /// </summary>
+    public int AdminMfaTokenMinutes { get; init; } = 5;
+
+    /// <summary>Wrong TOTP codes or recovery codes allowed per sign-in attempt before it is abandoned.</summary>
+    public int AdminMaxMfaAttempts { get; init; } = 5;
+
     public static AuthSettings Load(IConfiguration configuration, bool isDevelopment)
     {
         var section = configuration.GetSection("Auth");
@@ -44,6 +70,8 @@ public sealed class AuthSettings
         {
             JwtKey = ReadKey(section["JwtSigningKey"], "Auth:JwtSigningKey", isDevelopment),
             OtpKey = ReadKey(section["OtpHmacKey"], "Auth:OtpHmacKey", isDevelopment),
+            // AES-256-GCM needs exactly 32 bytes, so a longer key is cut rather than refused.
+            TotpKey = ReadKey(section["TotpEncryptionKey"], "Auth:TotpEncryptionKey", isDevelopment)[..TotpSecrets.KeyBytes],
             Issuer = section["Issuer"] ?? "hyderabadlinks-api",
             AccessTokenMinutes = section.GetValue("AccessTokenMinutes", 15),
             RefreshTokenDays = section.GetValue("RefreshTokenDays", 30),
@@ -55,6 +83,8 @@ public sealed class AuthSettings
             AdminRefreshTokenDays = section.GetValue("AdminRefreshTokenDays", 7),
             AdminMaxFailedLogins = section.GetValue("AdminMaxFailedLogins", 5),
             AdminLockoutMinutes = section.GetValue("AdminLockoutMinutes", 15),
+            AdminMfaTokenMinutes = section.GetValue("AdminMfaTokenMinutes", 5),
+            AdminMaxMfaAttempts = section.GetValue("AdminMaxMfaAttempts", 5),
         };
     }
 

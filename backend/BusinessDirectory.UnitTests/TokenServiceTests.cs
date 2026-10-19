@@ -10,6 +10,7 @@ public class TokenServiceTests
     {
         JwtKey = RandomNumberGenerator.GetBytes(32),
         OtpKey = RandomNumberGenerator.GetBytes(32),
+        TotpKey = RandomNumberGenerator.GetBytes(TotpSecrets.KeyBytes),
         Audience = audience,
     };
 
@@ -41,7 +42,7 @@ public class TokenServiceTests
     public async Task Token_for_another_audience_is_rejected()
     {
         var settings = NewSettings();
-        var adminLike = new TokenService(new AuthSettings { JwtKey = settings.JwtKey, OtpKey = settings.OtpKey, Audience = "admin" });
+        var adminLike = new TokenService(new AuthSettings { JwtKey = settings.JwtKey, OtpKey = settings.OtpKey, TotpKey = settings.TotpKey, Audience = "admin" });
         var token = adminLike.CreateAccessToken(42).Token;
 
         var result = await new JsonWebTokenHandler().ValidateTokenAsync(token, new TokenService(settings).ValidationParameters);

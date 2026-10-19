@@ -120,8 +120,32 @@ async function authed<T>(path: string, init: RequestInit = {}): Promise<ApiResul
 const json = (value: unknown): string => JSON.stringify(value);
 
 // ---- sign in (no token needed)
+/**
+ * A correct password no longer returns a session. MFA is mandatory, so it returns a short-lived
+ * token for the second step: `stage` is "mfa" when the admin already has an authenticator and
+ * "enroll" when they must set one up, which is every admin's first sign-in.
+ */
+export type MfaRequired = { stage: "mfa" | "enroll"; mfaToken: string; expiresInSeconds: number };
+
+/** `secret` is Base32, for typing in when a QR code cannot be scanned. */
+export type Enrollment = { secret: string; otpauthUri: string };
+
+/** Recovery codes come back exactly once, at enrollment, and can never be retrieved again. */
+export type Enrolled = SessionTokens & { recoveryCodes: string[] };
+
 export const adminLogin = (email: string, password: string) =>
-  send<SessionTokens>("/api/v1/auth/admin/login", { method: "POST", body: json({ email, password }) });
+  send<MfaRequired>("/api/v1/auth/admin/login", { method: "POST", body: json({ email, password }) });
+
+// The second step. Each of these is reachable only with the token the password step returned,
+// because the API gives that token a different audience from a real admin token.
+export const startEnrollment = (mfaToken: string) =>
+  send<Enrollment>("/api/v1/auth/admin/mfa/enroll/start", { method: "POST" }, mfaToken);
+
+export const confirmEnrollment = (mfaToken: string, code: string) =>
+  send<Enrolled>("/api/v1/auth/admin/mfa/enroll/confirm", { method: "POST", body: json({ code }) }, mfaToken);
+
+export const verifyMfa = (mfaToken: string, input: { code?: string; recoveryCode?: string }) =>
+  send<SessionTokens>("/api/v1/auth/admin/mfa/verify", { method: "POST", body: json(input) }, mfaToken);
 
 export const adminLogout = (refreshToken: string) =>
   send<void>("/api/v1/auth/admin/logout", { method: "POST", body: json({ refreshToken }) });

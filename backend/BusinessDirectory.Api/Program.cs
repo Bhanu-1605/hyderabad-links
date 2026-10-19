@@ -76,6 +76,7 @@ builder.Services.AddCors(options =>
 var authSettings = AuthSettings.Load(builder.Configuration, builder.Environment.IsDevelopment());
 builder.Services.AddSingleton(authSettings);
 builder.Services.AddSingleton<TokenService>();
+builder.Services.AddSingleton(new TotpSecrets(authSettings.TotpKey));
 if (builder.Environment.IsDevelopment())
 {
     builder.Services.AddSingleton<ISmsSender, ConsoleSmsSender>();   // prints the code in the API console
@@ -98,6 +99,18 @@ builder.Services
     {
         options.MapInboundClaims = false;
         options.TokenValidationParameters = tokenService.AdminValidationParameters;
+    })
+    // The two halfway states of an admin sign-in get schemes of their own, so a token issued after
+    // the password but before the authenticator code cannot satisfy the admin policy at all.
+    .AddJwtBearer(AdminAccess.MfaScheme, options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = tokenService.AdminMfaValidationParameters;
+    })
+    .AddJwtBearer(AdminAccess.EnrollScheme, options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = tokenService.AdminEnrollValidationParameters;
     });
 builder.Services.AddAuthorization(options =>
 {
@@ -107,6 +120,12 @@ builder.Services.AddAuthorization(options =>
         .RequireAuthenticatedUser());
     options.AddPolicy(AdminAccess.Policy, policy => policy
         .AddAuthenticationSchemes(AdminAccess.Scheme)
+        .RequireAuthenticatedUser());
+    options.AddPolicy(AdminAccess.MfaPolicy, policy => policy
+        .AddAuthenticationSchemes(AdminAccess.MfaScheme)
+        .RequireAuthenticatedUser());
+    options.AddPolicy(AdminAccess.EnrollPolicy, policy => policy
+        .AddAuthenticationSchemes(AdminAccess.EnrollScheme)
         .RequireAuthenticatedUser());
 });
 
@@ -180,7 +199,8 @@ publicApi.MapPublicSearchEndpoints();
 app.MapOwnerAuthEndpoints();   // /api/v1/auth/owner: request code, verify code, refresh, logout
 app.MapMeEndpoints();          // /api/v1/me: signed-in owner
 
-app.MapAdminAuthEndpoints();   // /api/v1/auth/admin: email + password login, refresh, logout
+app.MapAdminAuthEndpoints()   // /api/v1/auth/admin: email + password, then the mandatory second step
+   .MapAdminMfaEndpoints();   // /mfa/verify and /mfa/enroll/*: where an admin session is actually created
 app.MapAdminEndpoints();       // /api/v1/admin: signed-in administrator, listing moderation
 
 app.Run();

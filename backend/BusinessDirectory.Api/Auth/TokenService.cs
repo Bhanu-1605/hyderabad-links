@@ -20,11 +20,27 @@ public sealed class TokenService(AuthSettings settings)
 
     public TokenValidationParameters AdminValidationParameters => ParametersFor(AuthSettings.AdminAudience);
 
+    /// <summary>Validates the half-finished sign-in: password accepted, TOTP still to come.</summary>
+    public TokenValidationParameters AdminMfaValidationParameters => ParametersFor(AuthSettings.AdminMfaAudience);
+
+    /// <summary>Validates the token that reaches the enrollment endpoints and nothing else.</summary>
+    public TokenValidationParameters AdminEnrollValidationParameters => ParametersFor(AuthSettings.AdminEnrollAudience);
+
     public (string Token, int ExpiresInSeconds) CreateAccessToken(long userId) =>
         Create(userId, settings.Audience, settings.AccessTokenMinutes);
 
     public (string Token, int ExpiresInSeconds) CreateAdminAccessToken(long adminUserId) =>
         Create(adminUserId, AuthSettings.AdminAudience, settings.AdminAccessTokenMinutes);
+
+    /// <summary>
+    /// The tokens for the two halfway states. Both are short-lived and neither satisfies the admin
+    /// policy, because that scheme accepts only <see cref="AuthSettings.AdminAudience"/>.
+    /// </summary>
+    public (string Token, int ExpiresInSeconds) CreateAdminMfaToken(long adminUserId) =>
+        Create(adminUserId, AuthSettings.AdminMfaAudience, settings.AdminMfaTokenMinutes);
+
+    public (string Token, int ExpiresInSeconds) CreateAdminEnrollToken(long adminUserId) =>
+        Create(adminUserId, AuthSettings.AdminEnrollAudience, settings.AdminMfaTokenMinutes);
 
     private TokenValidationParameters ParametersFor(string audience) => new()
     {

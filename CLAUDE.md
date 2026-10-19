@@ -59,7 +59,7 @@ assert and roll back, so they are safe to re-run:
 Get-Content database/checks/search_smoke.sql | docker exec -i hl-postgres psql -U hl_dev -d hyderabad_links -v ON_ERROR_STOP=1
 ```
 
-`database/checks/` currently holds `v0002_smoke`, `v0003_smoke`, `search_smoke`,
+`database/checks/` currently holds `v0002_smoke`, `v0003_smoke`, `search_smoke`, `admin_mfa_smoke`, `owner_overview_smoke`,
 `locality_search_smoke`, `onboarding_smoke` and `admin_moderation_smoke`. Note the `-i` on `docker exec`: without it psql gets no stdin and the
 script silently does nothing.
 

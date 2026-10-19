@@ -1,5 +1,13 @@
 import { cookies } from "next/headers";
-import { ACCESS_COOKIE, REFRESH_COOKIE, accessCookieOptions, refreshCookieOptions, type SessionTokens } from "./session-cookies";
+import {
+  ACCESS_COOKIE,
+  MFA_COOKIE,
+  REFRESH_COOKIE,
+  accessCookieOptions,
+  mfaCookieOptions,
+  refreshCookieOptions,
+  type SessionTokens,
+} from "./session-cookies";
 
 // Server-side only (uses next/headers).
 
@@ -25,4 +33,19 @@ export function safeNextPath(value: string | null | undefined): string {
   const fallback = "/listings";
   if (!value || !value.startsWith("/listings") || value.startsWith("//") || value.includes("\\")) return fallback;
   return value;
+}
+
+export async function setMfaCookie(token: string, expiresInSeconds: number): Promise<void> {
+  const jar = await cookies();
+  jar.set(MFA_COOKIE, token, mfaCookieOptions(expiresInSeconds));
+}
+
+export async function readMfaToken(): Promise<string | null> {
+  const jar = await cookies();
+  return jar.get(MFA_COOKIE)?.value ?? null;
+}
+
+export async function clearMfaCookie(): Promise<void> {
+  const jar = await cookies();
+  jar.delete(MFA_COOKIE);
 }

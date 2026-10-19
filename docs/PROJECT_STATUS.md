@@ -16,15 +16,19 @@ Browser → its own Next.js server → API → PostgreSQL. No ORM; raw parameter
 > "Decisions needed" below. Nothing currently blocks feature work either way: the API is already
 > organised by audience, so the split would mostly move folders.
 
-## Verified on 2026-10-18
+## Verified on 2026-10-19
 
 All run locally and observed, not assumed:
 
 | Check | Result |
 |---|---|
 | `npm run verify` (migration check, script tests, typecheck, 3 production builds, .NET build + tests) | **passed** |
-| .NET unit tests | **231 passed**, 0 failed |
-| .NET integration tests | **77 passed**, 0 failed |
+| .NET unit tests | **286 passed**, 0 failed |
+| .NET integration tests | **85 passed**, 0 failed |
+| `database/checks/admin_mfa_smoke.sql` | **passed** (7 assertions, rolls back) |
+| Admin MFA against the running API | **works** — a password alone returns only a stage token and **401s on `/api/v1/admin/listings`**; enrollment, TOTP verification, the drift window, replay refusal, recovery-code single-use and lockout after five wrong codes were each exercised |
+| Admin MFA in a real browser | **works** — first sign-in walked password → authenticator setup → recovery codes shown once → moderation queue; signing out and back in asked for a code and returned to the queue, with moderation unaffected |
+| TOTP agreement with an independent implementation | **passes** — the RFC 6238 published test vectors in unit tests, and a separately written Node generator produced codes the API accepted |
 | Owner dashboard in a real browser | **works** — signed in by OTP, every sidebar item reaches a working page with the correct active state, Overview's figures and 3-of-6 checklist match the API exactly, and editing the name saved and was reflected everywhere |
 | `PUT /api/v1/me/profile` against the running API | **works** — 401 anonymous, 400 with field errors on bad input, 200 on a valid change, and an `owner.profile_updated` audit row written |
 | Owner routes refuse anonymous callers | **passes** — `/account`, `/account/listings`, `/account/listings/new`, `/account/profile` and `/account/settings` all answer 307 to `/login?next=…`; `/api/v1/me`, `/me/overview` and `/me/listings` all answer 401 |
@@ -305,6 +309,49 @@ verified, and changing it would mean re-verifying.
 layout above the page; without the revalidate that bar keeps the old name even after a redirect,
 because the layout stays in the client router cache. This was observed, not assumed.
 
+### Admin MFA (D28–D31)
+
+TOTP MFA is **mandatory** and enforced structurally rather than by a check in a handler. A correct
+password returns only a short-lived token on a *different audience* (`admin-mfa`, or
+`admin-enroll` for an admin with no authenticator yet), and the admin bearer scheme validates the
+audience, so that token fails on every real admin route. The `admin_sessions` row, the access token
+and the refresh token are created **only** by the MFA step, which stamps `last_mfa_at`; refresh
+carries that forward and refuses a session that lacks it.
+
+Both existing admin accounts are unenrolled, so each will be taken through authenticator setup on
+its next sign-in. That is the intended path — there is no way to skip it.
+
+- Hand-written RFC 6238 TOTP and RFC 4648 Base32, no new dependency, both checked against the
+  specifications' own published test vectors.
+- The secret is sealed with AES-256-GCM under `Auth:TotpEncryptionKey`; a tampered row fails to
+  open rather than decrypting to rubbish.
+- Ten recovery codes, shown once, stored only as hashes, spent by an `UPDATE` that matches only an
+  unused row so a race cannot spend one twice.
+- Wrong codes count against the same lockout allowance as wrong passwords.
+- The admin website now has the matching stages: password → code (with a recovery-code toggle), or
+  password → authenticator setup → recovery codes → in.
+
+**Two bugs found and fixed on the way, one of them pre-existing:**
+
+1. **Admin lockout never worked.** `make_interval(mins => …)` takes an integer, and the existing
+   code passed a double, so Postgres could not resolve the function: *every wrong admin password
+   answered 500 instead of 401, and no account was ever locked.* It had no test because the
+   integration tests run without a database. Now fixed and verified: five wrong passwords lock the
+   account.
+2. **Replay protection was not exact.** Deriving the spent TOTP step from `last_mfa_at` lets a code
+   accepted from the *next* step — which the drift window allows — be replayed, because that code
+   belongs to a later step than the completion time. Migration **V0005** adds
+   `admin_users.totp_last_step`, recording the step the verification itself matched.
+
+**Still not built:** MFA re-entry before individually sensitive actions (MFA gets you a session; a
+live session is not challenged again), and any endpoint to change or reset an authenticator. An
+admin who loses both authenticator and recovery codes currently needs a database intervention.
+
+**Local development caveat:** in Development a missing `Auth:TotpEncryptionKey` is generated
+randomly at startup, so **restarting the API makes every enrolled secret undecryptable** and admins
+must re-enroll. Set the variable to a fixed base64 value locally if you want enrollment to survive
+restarts.
+
 ## Not built yet
 
 Ordered by what unblocks the most.
@@ -499,6 +546,7 @@ None of these are in the repository, and none should be.
 | OTP / SMS delivery | an `ISmsSender` implementation + its provider keys | **Not configured.** Development prints the code to the API console (`ConsoleSmsSender`). Outside Development the API uses `UnconfiguredSmsSender`, which refuses to pretend. MSG91 is the intended provider. |
 | JWT signing key | `Auth:JwtSigningKey` | Development generates one. Production must supply it. |
 | OTP HMAC key | `Auth:OtpHmacKey` | As above. |
+| TOTP encryption key | `Auth:TotpEncryptionKey` | **Required in production** (base64, ≥32 bytes; only the first 32 are used). Development generates a random one per start, which invalidates enrolled authenticators on every restart. Rotating it in production forces every admin to re-enroll. |
 | Database | `ConnectionStrings:Default` | Local value comes from `.env` / Docker Compose. |
 | Email (Resend, D14) | not wired up | Not configured. |
 | Razorpay | not wired up | Not configured. |

@@ -22,3 +22,15 @@ export function accessCookieOptions(expiresInSeconds: number) {
 export const refreshCookieOptions = { ...base, maxAge: 60 * 60 * 24 * 7 };
 
 export type SessionTokens = { accessToken: string; refreshToken: string; expiresInSeconds: number };
+
+/**
+ * The half-finished sign-in: the password was accepted, the authenticator code is still to come.
+ * It is a credential of its own, so it lives in an httpOnly cookie like the others rather than in
+ * form state where a browser script could read it. Short-lived on purpose; the API's own token
+ * expires at the same time and is the real authority.
+ */
+export const MFA_COOKIE = "hl_admin_mfa";
+
+export function mfaCookieOptions(expiresInSeconds: number) {
+  return { ...base, maxAge: Math.max(expiresInSeconds, 60) };
+}
