@@ -20,6 +20,7 @@ public static class MeEndpoints
         group.MapGet("", GetMe);
         group.MapOwnerOnboardingEndpoints();
         group.MapOwnerOverviewEndpoints();
+        group.MapOwnerEnquiryEndpoints();
         group.MapOwnerProfileEndpoints();
         group.MapOwnerListingEndpoints();
         return group;

@@ -28,7 +28,8 @@ public static class OwnerOverviewEndpoints
 
     public sealed record CompletionStepDto(string Key, string Label, bool Done);
 
-    public sealed record OwnerOverviewDto(ListingCountsDto Listings, ProfileCompletionDto Profile);
+    /// <param name="NewEnquiries">Unread customer enquiries across every listing this owner holds.</param>
+    public sealed record OwnerOverviewDto(ListingCountsDto Listings, ProfileCompletionDto Profile, int NewEnquiries);
 
     public static RouteGroupBuilder MapOwnerOverviewEndpoints(this RouteGroupBuilder group)
     {
@@ -54,7 +55,12 @@ public static class OwnerOverviewEndpoints
                  (SELECT count(*) FROM owned WHERE btrim(coalesce(description, '')) <> ''),
                  (SELECT count(*) FROM owned WHERE btrim(coalesce(address_line, '')) <> ''),
                  u.name IS NOT NULL,
-                 btrim(coalesce(u.email, '')) <> ''
+                 btrim(coalesce(u.email, '')) <> '',
+                 (SELECT count(*)
+                  FROM enquiries e
+                  JOIN listings el ON el.id = e.listing_id
+                  JOIN business_members ebm ON ebm.business_id = el.business_id AND ebm.user_id = @user
+                  WHERE e.status = 'new')
           FROM users u
           WHERE u.id = @user AND u.status = 'active'";
 
@@ -118,6 +124,10 @@ public static class OwnerOverviewEndpoints
             withAddress: (int)reader.GetInt64(7),
             activeListings: active);
 
-        return Results.Ok(new OwnerOverviewDto(counts, completion));
+        // Unread enquiries are a real count now that V0006 exists; before it there was no table
+        // and the dashboard deliberately showed nothing rather than a fabricated zero.
+        var newEnquiries = (int)reader.GetInt64(10);
+
+        return Results.Ok(new OwnerOverviewDto(counts, completion, newEnquiries));
     }
 }

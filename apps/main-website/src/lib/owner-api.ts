@@ -172,10 +172,44 @@ export const getMeWithToken = (accessToken: string) => send<OwnerProfile>("/api/
 
 export const onboard = (input: OnboardingInput) =>
   authed<OnboardingResult>("/api/v1/me/onboarding", { method: "POST", body: json(input) });
+/** One customer enquiry as its owner sees it. The phone is private customer data. */
+export type OwnerEnquiry = {
+  id: number;
+  listingId: number;
+  listingName: string;
+  name: string;
+  phone: string;
+  email: string | null;
+  message: string;
+  status: string;
+  createdAt: string;
+};
+
+export type OwnerEnquiryPage = {
+  items: OwnerEnquiry[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  /** Unread across every listing, not just this page. */
+  newCount: number;
+};
+
 export const getOverview = () => authed<OwnerOverview>("/api/v1/me/overview");
 
 export const updateProfile = (input: { name: string; email: string }) =>
   authed<{ phone: string; name: string; email: string }>("/api/v1/me/profile", { method: "PUT", body: json(input) });
+
+export const listEnquiries = (options: { status?: string; page?: number } = {}) => {
+  const query = new URLSearchParams();
+  if (options.status) query.set('status', options.status);
+  if (options.page && options.page > 1) query.set('page', String(options.page));
+  const suffix = query.toString();
+  return authed<OwnerEnquiryPage>('/api/v1/me/enquiries' + (suffix ? '?' + suffix : ''));
+};
+
+export const setEnquiryStatus = (id: number, status: string) =>
+  authed<void>('/api/v1/me/enquiries/' + id + '/status', { method: 'PUT', body: json({ status }) });
 
 export const listMyListings = () => authed<OwnerListing[]>("/api/v1/me/listings");
 export const getMyListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}`);

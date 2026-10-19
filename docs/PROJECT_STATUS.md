@@ -16,15 +16,18 @@ Browser → its own Next.js server → API → PostgreSQL. No ORM; raw parameter
 > "Decisions needed" below. Nothing currently blocks feature work either way: the API is already
 > organised by audience, so the split would mostly move folders.
 
-## Verified on 2026-10-19
+## Verified on 2026-10-20
 
 All run locally and observed, not assumed:
 
 | Check | Result |
 |---|---|
 | `npm run verify` (migration check, script tests, typecheck, 3 production builds, .NET build + tests) | **passed** |
-| .NET unit tests | **286 passed**, 0 failed |
-| .NET integration tests | **85 passed**, 0 failed |
+| .NET unit tests | **314 passed**, 0 failed |
+| .NET integration tests | **89 passed**, 0 failed |
+| `database/checks/enquiry_smoke.sql` | **passed** (isolation, the ownership-scoped UPDATE, all four CHECK constraints, cascade on listing delete) |
+| Enquiries against the running API | **works** — validation and normalisation, 404 for a listing that is not live, two real owners proving one never sees the other's enquiries (and a cross-owner status change answering 404, not 403), status filters, and the per-IP-per-listing daily cap |
+| Enquiries in a real browser | **works** — sent from a listing page with the form replaced by a confirmation; the rate-limit message rendered when the cap was hit; the owner's inbox showed it, and "Mark replied" persisted and cleared the unread badge |
 | `database/checks/admin_mfa_smoke.sql` | **passed** (7 assertions, rolls back) |
 | Admin MFA against the running API | **works** — a password alone returns only a stage token and **401s on `/api/v1/admin/listings`**; enrollment, TOTP verification, the drift window, replay refusal, recovery-code single-use and lockout after five wrong codes were each exercised |
 | Admin MFA in a real browser | **works** — first sign-in walked password → authenticator setup → recovery codes shown once → moderation queue; signing out and back in asked for a code and returned to the queue, with moderation unaffected |
@@ -351,6 +354,28 @@ admin who loses both authenticator and recovery codes currently needs a database
 randomly at startup, so **restarting the API makes every enrolled secret undecryptable** and admins
 must re-enroll. Set the variable to a fixed base64 value locally if you want enrollment to survive
 restarts.
+
+### Customer enquiries (V0006)
+
+The directory's core function now leaves a record. Call and WhatsApp reach the owner but log nothing,
+so a missed call was a lost customer. An enquiry is a row the owner can work through.
+
+- `POST /api/v1/public/listings/{city}/{locality}/{slug}/enquiries` — public, no account. Accepts
+  only **live** listings, normalises the phone to E.164 and lowercases the email to match the CHECK
+  constraints, and is capped at 10 per IP per hour and 3 per IP per listing per day.
+- `GET /api/v1/me/enquiries` — the owner's inbox, filterable by status, paginated, with an unread
+  count across every listing. Every row is scoped through `business_members`, so an owner can only
+  ever see enquiries for their own listings.
+- `PUT /api/v1/me/enquiries/{id}/status` — read, replied, closed or spam. The ownership join is
+  part of the `UPDATE`, so another owner's id matches no row and answers **404 rather than 403**,
+  which tells a prober nothing.
+- Public form on the listing page; `/account/enquiries` in the dashboard, which fills in the
+  **Leads & Enquiries** sidebar item deliberately left out before the table existed.
+- The dashboard overview now reports a real unread count instead of omitting the figure.
+
+**No notification is sent when an enquiry arrives.** There is no email or SMS provider configured,
+and telling the owner we had messaged them would be worse than them finding it in the dashboard.
+That is the next thing this feature needs.
 
 ## Not built yet
 

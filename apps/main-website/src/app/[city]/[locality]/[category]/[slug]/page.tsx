@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 import Link from "next/link";
+import { EnquiryForm } from "@/components/EnquiryForm";
 import { JsonLd } from "@/components/JsonLd";
 import { initialsOf } from "@/components/ui/BusinessCard";
 import { getListing } from "@/lib/api";
@@ -187,6 +188,26 @@ export default async function ListingPage({ params }: Props) {
           before making a purchase.
         </p>
       </article>
+
+      {/*
+        Call and WhatsApp reach the owner immediately but leave no record. This form does: it
+        becomes an enquiry in the owner's dashboard, so a missed call is not a lost customer.
+      */}
+      <section
+        id="enquiry"
+        aria-labelledby="enquiry-heading"
+        className="mt-8 rounded-2xl border border-line bg-white p-5 shadow-[0_8px_28px_#002a3412] sm:p-7"
+      >
+        <h2 id="enquiry-heading" className="text-xl font-black text-ink">
+          Send {listing.name} a message
+        </h2>
+        <p className="mt-1 text-sm text-muted">
+          They will see your number and can call or message you back. No account needed.
+        </p>
+        <div className="mt-5 max-w-xl">
+          <EnquiryForm city={city} locality={locality} slug={slug} businessName={listing.name} />
+        </div>
+      </section>
 
       <p className="mt-8 text-center text-sm text-muted">
         <Link href={categoryPage} className="font-bold text-brand-700 hover:underline">

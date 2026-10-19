@@ -79,6 +79,59 @@ export async function searchListings(criteria: SearchCriteria): Promise<SearchRe
   return results ?? { items: [], page: 1, pageSize: 0, total: 0, totalPages: 0 };
 }
 
+export type EnquiryFailure = { ok: false; message: string; fieldErrors: Record<string, string> };
+export type EnquiryResult = { ok: true } | EnquiryFailure;
+
+/**
+ * Sends a customer enquiry to a business. Called from a server action, so the browser still never
+ * talks to the API directly.
+ *
+ * Unlike the read helpers above this one reports failures instead of throwing: the person is in the
+ * middle of filling in a form and needs to be told which field to fix.
+ */
+export async function sendEnquiry(
+  target: { city: string; locality: string; slug: string },
+  input: { name: string; phone: string; email: string; message: string },
+): Promise<EnquiryResult> {
+  const path = [target.city, target.locality, target.slug].map(encodeURIComponent).join("/");
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/public/listings/${path}/enquiries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ ...input, email: input.email || null }),
+      cache: "no-store",
+    });
+  } catch {
+    return { ok: false, message: "We could not reach the server. Please try again in a moment.", fieldErrors: {} };
+  }
+
+  if (response.ok) return { ok: true };
+
+  const fieldErrors: Record<string, string> = {};
+  let message = "We could not send your enquiry. Please try again.";
+  try {
+    const body = (await response.json()) as { detail?: unknown; errors?: Record<string, unknown> };
+    if (body.errors && typeof body.errors === "object") {
+      for (const [field, messages] of Object.entries(body.errors)) {
+        if (Array.isArray(messages) && typeof messages[0] === "string") fieldErrors[field] = messages[0];
+      }
+      message = "Please fix the fields marked below.";
+    } else if (typeof body.detail === "string") {
+      message = body.detail;
+    }
+  } catch {
+    // Not JSON: keep the generic message.
+  }
+
+  if (response.status === 404) {
+    message = "This business is no longer taking enquiries.";
+  }
+
+  return { ok: false, message, fieldErrors };
+}
+
 export async function getListing(citySlug: string, localitySlug: string, slug: string): Promise<ListingDetail | null> {
   const path = [citySlug, localitySlug, slug].map(encodeURIComponent).join("/");
   return getJson<ListingDetail>(`/api/v1/public/listings/${path}`, 60);

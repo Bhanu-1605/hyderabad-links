@@ -195,6 +195,7 @@ publicApi.MapGet("/meta", () => Results.Ok(new
 }));
 publicApi.MapPublicDirectoryEndpoints();
 publicApi.MapPublicSearchEndpoints();
+publicApi.MapPublicEnquiryEndpoints();   // customers contacting a business through its listing
 
 app.MapOwnerAuthEndpoints();   // /api/v1/auth/owner: request code, verify code, refresh, logout
 app.MapMeEndpoints();          // /api/v1/me: signed-in owner
