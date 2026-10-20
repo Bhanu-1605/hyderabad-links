@@ -10,6 +10,7 @@
     <PackageReference Include="Npgsql" Version="9.*" />
     <PackageReference Include="dbup-postgresql" Version="5.*" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.*" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.*" />
   </ItemGroup>
 
 </Project>

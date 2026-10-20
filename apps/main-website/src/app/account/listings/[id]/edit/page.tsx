@@ -52,13 +52,16 @@ export default async function EditListingPage({ params, searchParams }: Props) {
         </div>
         <p className="mt-2 text-muted">{describeStatus(listing.status).help}</p>
 
-        {listing.status === "active" ? (
-          <p className="mt-2">
+        <p className="mt-2 flex flex-wrap items-center gap-4">
+          <Link href={`/account/listings/${listing.id}/photos`} className="text-sm font-black text-brand-700 hover:underline">
+            Photos and video <span aria-hidden="true">&rarr;</span>
+          </Link>
+          {listing.status === "active" ? (
             <Link href={listing.url} className="text-sm font-black text-brand-700 hover:underline">
               View public page <span aria-hidden="true">&rarr;</span>
             </Link>
-          </p>
-        ) : null}
+          ) : null}
+        </p>
       </div>
 
       {listing.status === "rejected" && listing.reviewNote ? (

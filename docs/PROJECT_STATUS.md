@@ -1,6 +1,6 @@
 # Project status and handoff
 
-**Updated:** 2026-10-17. Read this first, then `CLAUDE.md`. It replaces re-auditing the repository.
+**Updated:** 2026-10-20. Read this first, then `CLAUDE.md`. It replaces re-auditing the repository.
 
 ## Architecture as built
 
@@ -23,8 +23,13 @@ All run locally and observed, not assumed:
 | Check | Result |
 |---|---|
 | `npm run verify` (migration check, script tests, typecheck, 3 production builds, .NET build + tests) | **passed** |
-| .NET unit tests | **333 passed**, 0 failed |
-| .NET integration tests | **94 passed**, 0 failed |
+| .NET unit tests | **348 passed**, 0 failed |
+| .NET integration tests | **99 passed**, 0 failed |
+| `database/checks/media_smoke.sql` | **passed** (10 assertions, rolls back) — the free default, the four plans, that no plan grants verification, that the allowances are still flagged provisional, an unknown plan refused, a duplicate storage key refused, the kind / size / dimension constraints, the quota counting visible media only, and the cascade when a listing is deleted |
+| V0008 applied to a **brand-new** database | **passed** — the whole migration chain plus the seeds ran into an empty database and `media_smoke` passed there, which is how the dimension-constraint bug below was proved fixed rather than patched only in the dev database |
+| Reference seed `R004_plans.sql` re-applied | **passed** — a second and third migrate changed nothing, and an allowance marked `media_limits_confirmed` survived the re-seed untouched (the seed updates only name, price and sort order) |
+| Media against the running API, with Azurite | **works** — 25 checks: anonymous refused (401); another owner's listing is "not found" for both reading and uploading; the Free plan refuses a photo and **records nothing**; Basic accepts a photo, stores it under a random key with the sniffed content type and the dimensions read from the file, and Azurite serves the exact bytes back; **an executable renamed `.png` is refused (415)**, and so is a PNG renamed `.mp4`; Basic refuses a video and a second logo; the fifth photo is refused once four are used; delete returns 204, removes the blob too, and a second delete is 404; a freed slot can be used again; an unknown kind is 400. On Advanced, a video is accepted, a second one too, and a third refused |
+| Media in a real browser | **works** — the owner's "Photos and video" screen for a listing on Advanced showed the plan name, the "not final yet" notice and 0 of 1 / 0 of 4 / 0 of 2. Uploading through the form moved it to "1 of 4 used" with the file served from Azurite (`naturalWidth` 64, so it really loaded), and an executable renamed `.png` came back as "Photos must be JPEG, PNG or WebP." with the count unchanged. On the public listing page the logo replaced the monogram and the gallery rendered both photos, with their URLs also in the `LocalBusiness` `image` array |
 | `database/checks/review_smoke.sql` | **passed** (9 assertions: pending on arrival, one per person, every CHECK constraint, average over approved rows only, a decided review cannot be re-decided, cascade) |
 | Reviews against the running API | **works** — anonymous refused; validation; **an owner cannot review their own business (403)**; a duplicate is refused by the constraint (409); nothing public until approved (`average: null`, not 0); the admin queue, approve, and a second decision answering 404; an audit row written |
 | Reviews on the public page | **works** — average 4.0, the reviewer shown by first name only, and a sign-in prompt for an anonymous visitor |
@@ -403,22 +408,61 @@ D11 required phone-verified reviewers plus moderation, and both are enforced rat
 moderator currently needs to call them directly. Abuse reporting (flagging a published review) is
 also still absent.
 
+### Listing media and plans (V0008, decisions D32–D34)
+
+Photos, a logo and video for a listing, with the plan's allowance enforced in the API.
+
+- **`plans`** holds the four tiers from D23 with their prices in paise and their photo / video / logo
+  allowances as columns. `media_limits_confirmed` is **false** on every row, because D23 approved the
+  prices but not the allowances: the numbers loaded are the ones in `requirements.md` (Free 0/0,
+  Basic 4/0, Advanced 4/2, Premium 16/4 — "Advanced" carrying what that document called "Gold"), and
+  every screen that shows them says they are not final. Changing one is an `UPDATE`, not a deploy,
+  and `R004_plans.sql` deliberately never overwrites an allowance once it has been confirmed.
+  **No plan grants a verified badge**; `grants_verified_badge` is false everywhere.
+- **`listings.plan_slug`** — per listing, following D5. Every existing listing became Free, which is
+  the no-cost default and changes nothing about any of them.
+- **`listing_media`** keeps the metadata; the bytes live in Blob Storage. `storage_key` is unique
+  across the table, and `is_hidden` is there for D10, so a downgrade can hide media without deleting
+  anybody's file.
+- **`IMediaStorage`** (`Media/MediaStorage.cs`) is the one seam between the API and storage: Azurite
+  locally, Azure Blob Storage in production, chosen by connection string alone. With none configured
+  the API answers **503 and writes no row**, rather than recording a file it never stored.
+- **`GET|POST /api/v1/me/listings/{id}/media`, `DELETE .../{mediaId}`** — the upload enforces three
+  things, each of them in the API and not in the UI:
+  - **ownership**, through the same `business_members` join the rest of the owner endpoints use, so
+    another owner's listing is "not found" rather than "forbidden";
+  - **the allowance**, counted inside the same transaction that inserts the row, with the listing row
+    locked first, so two uploads racing cannot both take the last free slot;
+  - **what the file actually is**, read from its first bytes (`MediaFile.SniffContentType`). The
+    filename and the declared Content-Type are attacker-controlled and are ignored; the stored blob
+    name is `listings/{id}/{kind}/{random}`, so nothing the caller sent reaches the path.
+  The row is reserved first, the bytes are stored next, and only then is the transaction committed —
+  a failure in between rolls the row back, so a gallery never lists a file that is not in storage.
+- **Owner screen** `/account/listings/{id}/photos` — one section per kind, each showing what the plan
+  allows and what is used, with the "not final yet" notice and the API's own refusal messages.
+- **Public listing page** — the logo replaces the monogram, and photos and video render in a gallery.
+  Hidden media is left out of the public response entirely, so it cannot leak. The photo URLs also go
+  into the `LocalBusiness` `image` array for search engines.
+
+**Not built around it:** no reordering, cropping or thumbnails; the search cards still show monograms;
+and nothing sets `is_hidden` yet, because the downgrade that would trigger it needs billing.
+
 ## Not built yet
 
 Ordered by what unblocks the most.
 
-1. **Admin MFA and account management.** Admin sign-in is email + password today. `docs/security.md`
-   requires mandatory TOTP MFA with recovery codes, and the tables for it (`admin_users.totp_*`,
-   `admin_recovery_codes`, `admin_sessions.last_mfa_at`) are already there but unused. **The admin
-   site must not be exposed outside the office network until this is built.** Inviting admins,
-   assigning roles and changing passwords also have no screens yet; today an account is created or
-   reset with the `create-admin` command.
+1. **Admin account management.** Mandatory TOTP MFA is **built** (D28–D31). What is still missing is
+   the management around it: inviting admins, assigning roles and changing passwords have no screens,
+   so an account is still created or reset with the `create-admin` command.
 2. **The rest of admin moderation.** Approve, reject, add and edit exist. Suspending a live listing,
    verifying a business, and handling abuse reports are not built, although the permissions for them
    are seeded.
 3. **Super-admin website** — placeholder only. No `/api/v1/super-admin` endpoints.
-4. **Media** — no tables, no upload endpoints, no Blob Storage code. Subscription media limits
-   (Basic 4/0, Gold 4/2, Premium 16/4) are therefore not enforced anywhere.
+4. **Media** — **built** (V0008). See "Listing media and plans" under "What works today". What is
+   still missing around it: no reordering, no cropping or resizing, no thumbnails on the search
+   cards, and nothing yet hides over-allowance media when a plan is downgraded (the `is_hidden`
+   column and the public filter exist; the job that sets it does not, because there is no billing
+   to trigger it).
 5. **Subscriptions and payments** — no tables, no Razorpay integration, no entitlement checks.
 6. **Enquiries and leads, reviews, favourites, notifications** — no tables, no endpoints.
 7. **OpenAPI documentation** — the API publishes none. The brief requires it, and
@@ -430,6 +474,20 @@ Ordered by what unblocks the most.
 12. **Azure infrastructure as code** — `infrastructure/azure/` holds only a README.
 
 ## Known limitations in what *is* built
+
+**Media files are not reference-counted.** Deleting a photo removes the row first and the blob
+second: if the blob delete fails, the file stays in storage with nothing pointing at it. That is the
+deliberate trade — a listing still showing a photo the owner deleted would be worse — but it means a
+rare orphaned blob, and there is no sweeper for them yet. The upload path has the mirror case: if the
+commit fails after the bytes are stored, the API deletes the blob it just wrote.
+
+**A dimension CHECK that silently accepted bad rows (found and fixed on 2026-10-20).** The first
+version of `listing_media_dimensions` read `(width IS NULL AND height IS NULL) OR (width > 0 AND
+height > 0)`. With only a width set, the second half evaluates to NULL rather than false, and a CHECK
+constraint **accepts** NULL — so a half-measured row would have been stored. `media_smoke.sql` caught
+it. The constraint now tests `IS NOT NULL` explicitly, and the fix was proved by running the whole
+migration chain into a brand-new database, not only by altering the dev one.
+
 
 - **The site header fetches the category tree, so `getCategories()` must never throw.** `SiteHeader`
   is an async server component rendered in the root layout, which means every statically prerendered
@@ -575,8 +633,12 @@ that, and the redesign changes no URL.
 1. **One API or two?** See the architecture note above. Nothing is blocked while this is open.
 2. **Per-tier media allowance, and the verified badge.** D23 settled the tiers and prices but not how
    many photos and videos each one allows. Separately, the prototype grants a verified badge with
-   paid Basic, while the earlier requirement was that a paid plan must never auto-grant one. Both
-   block media and billing work.
+   paid Basic, while the earlier requirement was that a paid plan must never auto-grant one. **This
+   no longer blocks media work**: the allowances live in the `plans` table with the documented
+   numbers loaded (Free 0/0, Basic 4/0, Advanced 4/2, Premium 16/4 — "Advanced" carrying what the
+   requirements called "Gold"), `media_limits_confirmed` is false on every row, and the owner screens
+   say the numbers are not final. **Answering it is an UPDATE, not a deploy.** No plan grants a badge.
+   Billing still needs the answer, and so does the billing period, which is documented nowhere.
 3. **OTP provider.** The prototype uses Twilio Verify; this API's code comments name MSG91. Only one
    should be registered for DLT, so pick before starting that paperwork.
 4. **Maps provider** (D14) — still open, and now demonstrably avoidable for the moment:
@@ -601,9 +663,27 @@ None of these are in the repository, and none should be.
 | Database | `ConnectionStrings:Default` | Local value comes from `.env` / Docker Compose. |
 | Email (Resend, D14) | not wired up | Not configured. |
 | Razorpay | not wired up | Not configured. |
-| Azure Blob Storage | not wired up | Azurite runs locally in Docker Compose, unused so far. |
+| Azure Blob Storage | `Media:BlobConnectionString`, `Media:ContainerName`, `Media:PublicBaseUrl` | **Code is wired up and used.** Locally it is Azurite's `UseDevelopmentStorage=true` (in `appsettings.Development.json`; the emulator's own well-known account, not a secret). Production needs a real connection string from Key Vault and an account that allows blob public access — see `docs/deployment.md`. With none set the API refuses uploads with 503 rather than pretending. |
 
 ## Suggested next step
+
+**Last finished: listing media (V0008).** Plans, entitlements, uploads, the owner screen and the
+public gallery are all built and verified — see the table at the top and "Listing media and plans".
+
+In the order that now unblocks the most:
+
+1. **Logos and thumbnails on the cards.** The search results, the locality + category pages and the
+   nearby list all still draw monograms. The data exists now, so this is a frontend change plus one
+   extra column in the search query. It is the smallest piece of work with the most visible effect.
+2. **The admin UI for review moderation.** The endpoints are built and tested; a moderator still has
+   to call them by hand.
+3. **Abuse reporting**, which the seeded `reports.handle` permission already anticipates.
+4. **Sitemap and the rest of SEO**, now that every public page has its final shape.
+5. **Subscriptions and payments**, which stay blocked on the owner: the billing period for the three
+   paid tiers is documented nowhere, and the verified-badge policy is still open. Media no longer
+   waits on either.
+
+The earlier plan, kept for context:
 
 **The redesign is finished.** Every public page and every owner screen now uses the shared design
 system, and each one was verified in a browser before the next was started.

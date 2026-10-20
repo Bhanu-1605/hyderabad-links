@@ -3,6 +3,7 @@ using System.Threading.RateLimiting;
 using BusinessDirectory.Api.Auth;
 using BusinessDirectory.Api.Data;
 using BusinessDirectory.Api.Endpoints;
+using BusinessDirectory.Api.Media;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Npgsql;
@@ -85,6 +86,22 @@ else
 {
     builder.Services.AddSingleton<ISmsSender, UnconfiguredSmsSender>();   // replaced by the MSG91 sender before launch
 }
+
+// ---- Media storage (Azure Blob Storage; Azurite locally) --------------------------------
+// Configured by connection string only. With none set, uploads are refused rather than accepted
+// and silently dropped (see UnconfiguredMediaStorage).
+var mediaSettings = MediaSettings.Load(builder.Configuration);
+builder.Services.AddSingleton(mediaSettings);
+if (!string.IsNullOrWhiteSpace(mediaSettings.ConnectionString))
+{
+    builder.Services.AddSingleton<BlobMediaStorage>();
+    builder.Services.AddSingleton<IMediaStorage>(services => services.GetRequiredService<BlobMediaStorage>());
+}
+else
+{
+    builder.Services.AddSingleton<IMediaStorage, UnconfiguredMediaStorage>();
+}
+
 // Two bearer schemes, one per realm: both check the same signature, but each accepts only its own
 // audience. Pinning the scheme to the policy is what stops an owner token working on an admin route.
 var tokenService = new TokenService(authSettings);
@@ -152,6 +169,22 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// The container has to exist before the first upload. Created here rather than lazily on each
+// upload, so a wrong connection string shows up in the startup log instead of in a user's error.
+if (app.Services.GetService<BlobMediaStorage>() is { } blobStorage)
+{
+    try
+    {
+        await blobStorage.EnsureContainerAsync(CancellationToken.None);
+    }
+    catch (Exception ex)
+    {
+        // Storage being unreachable must not stop the site serving listings; uploads will fail
+        // and say so. (Locally this means Azurite is not running.)
+        app.Logger.LogError(ex, "Media storage container could not be prepared. Uploads will fail until it is reachable.");
+    }
+}
 
 // ---- Pipeline ------------------------------------------------------------------------
 // Behind Azure App Service the real client IP arrives in X-Forwarded-For. Set the environment

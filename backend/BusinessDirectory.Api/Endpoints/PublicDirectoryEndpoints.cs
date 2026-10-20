@@ -1,4 +1,5 @@
 using BusinessDirectory.Api.Listings;
+using BusinessDirectory.Api.Media;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -41,6 +42,12 @@ public static class PublicDirectoryEndpoints
         string? PhoneWhatsapp,
         string Url);
 
+    /// <summary>
+    /// One file on a public listing page. Hidden media (over the plan's allowance after a downgrade,
+    /// decision D10) is left out entirely, so the public response cannot leak what is not on display.
+    /// </summary>
+    public sealed record PublicMediaDto(string Kind, string Url, int? Width, int? Height);
+
     public sealed record ListingDetailDto(
         string Slug,
         string Name,
@@ -58,7 +65,8 @@ public static class PublicDirectoryEndpoints
         string LocalityName,
         string CategorySlug,
         string CategoryName,
-        string Url);
+        string Url,
+        List<PublicMediaDto> Media);
 
     public static RouteGroupBuilder MapPublicDirectoryEndpoints(this RouteGroupBuilder group)
     {
@@ -294,12 +302,13 @@ public static class PublicDirectoryEndpoints
         return Results.Ok(results);
     }
 
-    private static async Task<IResult> GetListing(string citySlug, string localitySlug, string slug, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetListing(
+        string citySlug, string localitySlug, string slug, NpgsqlDataSource db, IMediaStorage storage, CancellationToken ct)
     {
         await using var command = db.CreateCommand(
             @"SELECT li.slug, li.name, li.description, li.address_line, li.pincode, li.phone_primary, li.phone_whatsapp,
                      li.website_url, ST_Y(li.location::geometry), ST_X(li.location::geometry),
-                     ci.slug, ci.name, lo.slug, lo.name, pc.slug, pc.name
+                     ci.slug, ci.name, lo.slug, lo.name, pc.slug, pc.name, li.id
               FROM listings li
               JOIN localities lo ON lo.id = li.locality_id
               JOIN cities ci ON ci.id = lo.city_id
@@ -317,6 +326,11 @@ public static class PublicDirectoryEndpoints
         }
 
         var categorySlug = reader.GetString(14);
+
+        // Read the media before the DTO is built, while this reader is still open: it runs on its own
+        // connection from the pool, so the two queries do not get in each other's way.
+        var media = await ReadPublicMedia(db, reader.GetInt64(16), storage, ct);
+
         return Results.Ok(new ListingDetailDto(
             reader.GetString(0),
             reader.GetString(1),
@@ -334,6 +348,31 @@ public static class PublicDirectoryEndpoints
             reader.GetString(13),
             categorySlug,
             reader.GetString(15),
-            $"/{reader.GetString(10)}/{reader.GetString(12)}/{categorySlug}/{reader.GetString(0)}"));
+            $"/{reader.GetString(10)}/{reader.GetString(12)}/{categorySlug}/{reader.GetString(0)}",
+            media));
+    }
+
+    /// <summary>The listing's visible media, logo first, then photos, then video, each in its display order.</summary>
+    private static async Task<List<PublicMediaDto>> ReadPublicMedia(
+        NpgsqlDataSource db, long listingId, IMediaStorage storage, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand(
+            @"SELECT kind, storage_key, width, height
+              FROM listing_media
+              WHERE listing_id = @listing AND NOT is_hidden
+              ORDER BY CASE kind WHEN 'logo' THEN 0 WHEN 'photo' THEN 1 ELSE 2 END, sort_order, id");
+        command.Parameters.AddWithValue("listing", listingId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var media = new List<PublicMediaDto>();
+        while (await reader.ReadAsync(ct))
+        {
+            media.Add(new PublicMediaDto(
+                reader.GetString(0),
+                storage.PublicUrl(reader.GetString(1)),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3)));
+        }
+        return media;
     }
 }

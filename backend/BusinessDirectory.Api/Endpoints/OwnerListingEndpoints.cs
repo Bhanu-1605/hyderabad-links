@@ -58,6 +58,7 @@ public static class OwnerListingEndpoints
         group.MapGet("/{id:long}", Get);
         group.MapPut("/{id:long}", Update);
         group.MapPost("/{id:long}/submit", Submit);
+        group.MapOwnerMediaEndpoints();   // photos, logo and video, with the plan allowance enforced
         return group;
     }
 

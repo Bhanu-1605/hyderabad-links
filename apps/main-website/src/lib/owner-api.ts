@@ -243,6 +243,79 @@ export const updateListing = (id: number, input: ListingFormInput) =>
   authed<OwnerListing>(`/api/v1/me/listings/${id}`, { method: "PUT", body: json(toPayload({ ...input, localitySlug: undefined })) });
 export const submitListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}/submit`, { method: "POST" });
 
+/** One photo, logo or video on a listing. `url` is the address the browser loads the file from. */
+export type ListingMediaItem = {
+  id: number;
+  kind: "logo" | "photo" | "video";
+  url: string;
+  contentType: string;
+  byteSize: number;
+  width: number | null;
+  height: number | null;
+  sortOrder: number;
+  /** Hidden after a downgrade: kept, but not shown on the public page (decision D10). */
+  isHidden: boolean;
+  createdAt: string;
+};
+
+/**
+ * What the listing's plan allows and what it has used.
+ * `limitsConfirmed` is false while the per-tier allowances are still provisional, and the screen
+ * says so rather than presenting an unconfirmed number as a promise.
+ */
+export type ListingMediaAllowance = {
+  planSlug: string;
+  planName: string;
+  photoLimit: number;
+  videoLimit: number;
+  logoLimit: number;
+  photosUsed: number;
+  videosUsed: number;
+  logosUsed: number;
+  limitsConfirmed: boolean;
+  uploadsAvailable: boolean;
+};
+
+export type ListingMedia = { allowance: ListingMediaAllowance; items: ListingMediaItem[] };
+
+export const getListingMedia = (id: number) => authed<ListingMedia>(`/api/v1/me/listings/${id}/media`);
+
+export const deleteListingMedia = (id: number, mediaId: number) =>
+  authed<void>(`/api/v1/me/listings/${id}/media/${mediaId}`, { method: "DELETE" });
+
+/**
+ * Sends the file to the API. Written out rather than going through `send`, because that sets a JSON
+ * content type: a multipart body must keep the boundary fetch generates for it.
+ */
+export async function uploadListingMedia(
+  id: number,
+  kind: "logo" | "photo" | "video",
+  file: File,
+): Promise<ApiResult<ListingMediaItem>> {
+  const { access } = await readTokens();
+  if (!access) redirect("/login/reset");
+
+  const body = new FormData();
+  body.set("kind", kind);
+  body.set("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/me/listings/${id}/media`, {
+      method: "POST",
+      headers: { Accept: "application/json", Authorization: `Bearer ${access}` },
+      body,
+      cache: "no-store",
+    });
+  } catch {
+    return { ok: false, status: 0, message: "We could not reach the server. Please try again in a moment.", fieldErrors: {} };
+  }
+
+  if (response.status === 401) redirect("/login/reset");
+  if (!response.ok) return toFailure(response);
+  return { ok: true, data: (await response.json()) as ListingMediaItem };
+}
+
 /** Plain-language status for the owner. */
 export function describeStatus(status: string): { label: string; tone: "grey" | "amber" | "green" | "red"; help: string } {
   switch (status) {

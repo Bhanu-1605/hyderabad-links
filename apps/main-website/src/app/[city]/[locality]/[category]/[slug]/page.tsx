@@ -5,6 +5,7 @@ import { EnquiryForm } from "@/components/EnquiryForm";
 import { ReviewForm } from "@/components/ReviewForm";
 import { Reviews } from "@/components/Reviews";
 import { JsonLd } from "@/components/JsonLd";
+import { ListingGallery } from "@/components/ListingGallery";
 import { initialsOf } from "@/components/ui/BusinessCard";
 import { getListing, getReviews } from "@/lib/api";
 import { readTokens } from "@/lib/session";
@@ -102,6 +103,10 @@ export default async function ListingPage({ params }: Props) {
 
   const categoryPage = `/${listing.citySlug}/${listing.localitySlug}/${listing.categorySlug}`;
   const facts = factsFor(listing);
+  // An older listing has no media at all; a plan may also allow none. Both read as an empty list.
+  const media = listing.media ?? [];
+  const logo = media.find((item) => item.kind === "logo");
+  const images = media.filter((item) => item.kind !== "video").map((item) => item.url);
 
   return (
     <main className="mx-auto max-w-4xl px-5 py-10 sm:px-8">
@@ -137,12 +142,23 @@ export default async function ListingPage({ params }: Props) {
       </nav>
 
       <article className="mt-6 rounded-2xl border border-line bg-white p-6 shadow-[0_12px_36px_#002a3410] sm:p-10">
-        <div
-          aria-hidden="true"
-          className="grid h-20 w-20 place-items-center rounded-full border border-brand-200 bg-brand-50 text-2xl font-black text-brand-700"
-        >
-          {initialsOf(listing.name)}
-        </div>
+        {logo ? (
+          <img
+            src={logo.url}
+            alt={`${listing.name} logo`}
+            width={logo.width ?? undefined}
+            height={logo.height ?? undefined}
+            className="h-20 w-20 rounded-full border border-brand-200 bg-white object-contain"
+          />
+        ) : (
+          // No logo uploaded: the initials stand in, as they do on the search cards.
+          <div
+            aria-hidden="true"
+            className="grid h-20 w-20 place-items-center rounded-full border border-brand-200 bg-brand-50 text-2xl font-black text-brand-700"
+          >
+            {initialsOf(listing.name)}
+          </div>
+        )}
 
         <p className="mt-6 text-[11px] font-black tracking-[0.22em] text-muted">HYDERABAD BUSINESS DIRECTORY</p>
         <h1 className="mt-2 text-3xl leading-tight font-black tracking-tight text-brand-800 sm:text-4xl lg:text-5xl">
@@ -198,6 +214,8 @@ export default async function ListingPage({ params }: Props) {
         </p>
       </article>
 
+      <ListingGallery media={media} businessName={listing.name} />
+
       <Reviews
         summary={reviews}
         businessName={listing.name}
@@ -250,6 +268,9 @@ export default async function ListingPage({ params }: Props) {
             addressCountry: "IN",
           },
           geo: { "@type": "GeoCoordinates", latitude: listing.latitude, longitude: listing.longitude },
+          // Search engines show these next to the result. Only real uploaded files are listed, and
+          // the property is left out altogether when the business has none.
+          image: images.length > 0 ? images : undefined,
         }}
       />
     </main>

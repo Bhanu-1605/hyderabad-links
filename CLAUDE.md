@@ -60,7 +60,7 @@ Get-Content database/checks/search_smoke.sql | docker exec -i hl-postgres psql -
 ```
 
 `database/checks/` currently holds `v0002_smoke`, `v0003_smoke`, `search_smoke`, `admin_mfa_smoke`, `owner_overview_smoke`,
-`locality_search_smoke`, `onboarding_smoke`, `enquiry_smoke`, `review_smoke` and `admin_moderation_smoke`. Note the `-i` on `docker exec`: without it psql gets no stdin and the
+`locality_search_smoke`, `onboarding_smoke`, `enquiry_smoke`, `review_smoke`, `admin_moderation_smoke` and `media_smoke`. Note the `-i` on `docker exec`: without it psql gets no stdin and the
 script silently does nothing.
 
 The .NET integration tests deliberately need **no** database, because CI runs them without one.

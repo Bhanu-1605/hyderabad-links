@@ -29,6 +29,16 @@ export type ListingDetail = {
   categorySlug: string;
   categoryName: string;
   url: string;
+  /** Logo first, then photos, then video. Media the plan no longer covers is not in this list at all. */
+  media: ListingMedia[];
+};
+
+/** One file on a public listing page. */
+export type ListingMedia = {
+  kind: "logo" | "photo" | "video";
+  url: string;
+  width: number | null;
+  height: number | null;
 };
 
 /** Flat, search-friendly view of the category tree (sub-categories first, then parents). */
