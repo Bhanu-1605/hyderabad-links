@@ -2,9 +2,12 @@ import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 import Link from "next/link";
 import { EnquiryForm } from "@/components/EnquiryForm";
+import { ReviewForm } from "@/components/ReviewForm";
+import { Reviews } from "@/components/Reviews";
 import { JsonLd } from "@/components/JsonLd";
 import { initialsOf } from "@/components/ui/BusinessCard";
-import { getListing } from "@/lib/api";
+import { getListing, getReviews } from "@/lib/api";
+import { readTokens } from "@/lib/session";
 import { absoluteUrl, mapsHref, telHref, whatsappHref } from "@/lib/format";
 import type { ListingDetail } from "@/lib/types";
 
@@ -87,6 +90,12 @@ export default async function ListingPage({ params }: Props) {
   const { city, locality, category, slug } = await params;
   const listing = await getListing(city, locality, slug);
   if (!listing) notFound();
+
+  // Reviews are public, so they are fetched for everyone. Whether this visitor can *write* one
+  // depends on a session cookie: readTokens() just reads it, unlike the owner helpers, which
+  // redirect to sign-in when there is none - wrong behaviour on a public page.
+  const [reviews, tokens] = await Promise.all([getReviews(city, locality, slug), readTokens()]);
+  const signedIn = tokens.access !== null;
 
   // The category in the URL must be the listing's primary category, otherwise 301 to the canonical URL (decision D4).
   if (category !== listing.categorySlug) permanentRedirect(listing.url);
@@ -188,6 +197,15 @@ export default async function ListingPage({ params }: Props) {
           before making a purchase.
         </p>
       </article>
+
+      <Reviews
+        summary={reviews}
+        businessName={listing.name}
+        signedIn={signedIn}
+        writeHref={`/login?next=${encodeURIComponent(`/${city}/${locality}/${category}/${slug}`)}`}
+      >
+        <ReviewForm city={city} locality={locality} slug={slug} />
+      </Reviews>
 
       {/*
         Call and WhatsApp reach the owner immediately but leave no record. This form does: it

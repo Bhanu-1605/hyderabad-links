@@ -72,3 +72,6 @@ export type SearchCriteria = {
   page?: number;
   pageSize?: number;
 };
+
+/** Re-exported from the API client so components can import review shapes from one place. */
+export type { PublicReview, ReviewSummary } from "./api";

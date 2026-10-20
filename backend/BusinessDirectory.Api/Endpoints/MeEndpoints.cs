@@ -21,6 +21,7 @@ public static class MeEndpoints
         group.MapOwnerOnboardingEndpoints();
         group.MapOwnerOverviewEndpoints();
         group.MapOwnerEnquiryEndpoints();
+        group.MapCustomerReviewEndpoints();
         group.MapOwnerProfileEndpoints();
         group.MapOwnerListingEndpoints();
         return group;

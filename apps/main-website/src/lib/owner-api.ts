@@ -211,6 +211,30 @@ export const listEnquiries = (options: { status?: string; page?: number } = {}) 
 export const setEnquiryStatus = (id: number, status: string) =>
   authed<void>('/api/v1/me/enquiries/' + id + '/status', { method: 'PUT', body: json({ status }) });
 
+/** A review this person wrote, including what moderation decided about it. */
+export type MyReview = {
+  id: number;
+  listingId: number;
+  listingName: string;
+  url: string;
+  rating: number;
+  body: string;
+  status: string;
+  moderationNote: string | null;
+  createdAt: string;
+};
+
+export const submitReview = (
+  target: { city: string; locality: string; slug: string },
+  input: { rating: number; body: string },
+) =>
+  authed<{ id: number; status: string }>(
+    `/api/v1/me/reviews/${[target.city, target.locality, target.slug].map(encodeURIComponent).join("/")}`,
+    { method: "POST", body: json(input) },
+  );
+
+export const listMyReviews = () => authed<MyReview[]>("/api/v1/me/reviews");
+
 export const listMyListings = () => authed<OwnerListing[]>("/api/v1/me/listings");
 export const getMyListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}`);
 export const createListing = (input: ListingFormInput) =>

@@ -1,7 +1,9 @@
 "use server";
 
 import { sendEnquiry } from "@/lib/api";
+import { submitReview } from "@/lib/owner-api";
 import type { EnquiryFormState } from "./enquiry-state";
+import type { ReviewFormState } from "./review-state";
 
 /**
  * Sends a customer enquiry to a business.
@@ -32,4 +34,34 @@ export async function sendEnquiryAction(
   }
 
   return { values, fieldErrors: {}, sent: true };
+}
+
+/**
+ * Submits a customer review. The API checks that the reviewer has a verified phone, that they do
+ * not manage the business, and that they have not reviewed it already — so this only reports back.
+ *
+ * On success the review is *pending*, not published, which the confirmation says plainly.
+ */
+export async function submitReviewAction(
+  _previous: ReviewFormState,
+  formData: FormData,
+): Promise<ReviewFormState> {
+  const read = (field: string) => String(formData.get(field) ?? "").trim();
+  const values = { rating: read("rating"), body: read("body") };
+
+  const rating = Number(values.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return { values, message: "Please fix the fields marked below.", fieldErrors: { rating: "Choose a rating from 1 to 5 stars." } };
+  }
+
+  const result = await submitReview(
+    { city: read("city"), locality: read("locality"), slug: read("slug") },
+    { rating, body: values.body },
+  );
+
+  if (!result.ok) {
+    return { values, message: result.message, fieldErrors: result.fieldErrors };
+  }
+
+  return { values, fieldErrors: {}, submitted: true };
 }

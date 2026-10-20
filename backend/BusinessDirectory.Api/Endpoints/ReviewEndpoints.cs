@@ -1,0 +1,445 @@
+using System.Net;
+using System.Security.Claims;
+using BusinessDirectory.Api.Auth;
+using BusinessDirectory.Api.Listings;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace BusinessDirectory.Api.Endpoints;
+
+/// <summary>
+/// Customer reviews, under three audiences: the public reads approved ones, a signed-in customer
+/// writes one, and an administrator moderates.
+///
+/// Decision D11 is enforced in two places that matter:
+///   - the reviewer must be a phone-verified user, which the token already proves
+///   - nothing appears publicly until a moderator approves it
+/// </summary>
+public static class ReviewEndpoints
+{
+    public sealed record SubmitReviewRequest(int? Rating, string? Body);
+
+    /// <param name="AuthorName">The reviewer's first name only. Reviews are not anonymous, but a
+    /// full name and phone number are not the public's business either.</param>
+    public sealed record PublicReviewDto(long Id, short Rating, string Body, string AuthorName, DateTime CreatedAt);
+
+    /// <param name="Average">Null when nothing has been approved yet, rather than 0, which would
+    /// read as "rated zero".</param>
+    public sealed record ReviewSummaryDto(double? Average, int Count, IReadOnlyList<PublicReviewDto> Items);
+
+    /// <param name="Status">pending, approved or rejected — the reviewer can see what happened.</param>
+    public sealed record MyReviewDto(
+        long Id,
+        long ListingId,
+        string ListingName,
+        string Url,
+        short Rating,
+        string Body,
+        string Status,
+        string? ModerationNote,
+        DateTime CreatedAt);
+
+    public sealed record ModerationReviewDto(
+        long Id,
+        long ListingId,
+        string ListingName,
+        short Rating,
+        string Body,
+        string ReviewerPhone,
+        DateTime CreatedAt);
+
+    public sealed record ModerationPage(IReadOnlyList<ModerationReviewDto> Items, int Page, int PageSize, int Total, int TotalPages);
+
+    public sealed record DecisionRequest(string? Note);
+
+    private const int PublicPageSize = 10;
+    private const int ModerationPageSize = 20;
+
+    public static RouteGroupBuilder MapPublicReviewEndpoints(this RouteGroupBuilder group)
+    {
+        group.MapGet("/listings/{citySlug}/{localitySlug}/{slug}/reviews", GetPublicReviews);
+        return group;
+    }
+
+    public static RouteGroupBuilder MapCustomerReviewEndpoints(this RouteGroupBuilder group)
+    {
+        group.MapPost("/reviews/{citySlug}/{localitySlug}/{slug}", Submit);
+        group.MapGet("/reviews", ListMine);
+        return group;
+    }
+
+    public static RouteGroupBuilder MapAdminReviewEndpoints(this RouteGroupBuilder group)
+    {
+        group.MapGet("/reviews", ListForModeration);
+        group.MapPost("/reviews/{id:long}/approve", Approve);
+        group.MapPost("/reviews/{id:long}/reject", Reject);
+        return group;
+    }
+
+    // ------------------------------------------------------------------ public
+    private static async Task<IResult> GetPublicReviews(
+        string citySlug,
+        string localitySlug,
+        string slug,
+        NpgsqlDataSource db,
+        CancellationToken ct)
+    {
+        // Only approved reviews, and only for a live listing. The average is computed over the same
+        // set the visitor can read, so the number and the list can never disagree.
+        await using var command = db.CreateCommand(
+            @"WITH target AS (
+                  SELECT li.id
+                  FROM listings li
+                  JOIN localities lo ON lo.id = li.locality_id
+                  JOIN cities ci ON ci.id = lo.city_id
+                  WHERE ci.slug = @city AND lo.slug = @locality AND li.slug = @slug AND li.status = 'active'
+              ),
+              approved AS (
+                  SELECT r.id, r.rating, r.body, r.created_at, u.name AS author_name
+                  FROM reviews r
+                  JOIN target t ON t.id = r.listing_id
+                  JOIN users u ON u.id = r.user_id
+                  WHERE r.status = 'approved'
+              )
+              SELECT (SELECT count(*) FROM approved),
+                     (SELECT avg(rating)::double precision FROM approved),
+                     a.id, a.rating, a.body, a.author_name, a.created_at
+              FROM (SELECT 1) AS always_one_row
+              LEFT JOIN (SELECT * FROM approved ORDER BY created_at DESC LIMIT @limit) a ON true
+              ORDER BY a.created_at DESC");
+        command.Parameters.AddWithValue("city", citySlug);
+        command.Parameters.AddWithValue("locality", localitySlug);
+        command.Parameters.AddWithValue("slug", slug);
+        command.Parameters.AddWithValue("limit", PublicPageSize);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var items = new List<PublicReviewDto>();
+        var count = 0;
+        double? average = null;
+        while (await reader.ReadAsync(ct))
+        {
+            count = (int)reader.GetInt64(0);
+            average = reader.IsDBNull(1) ? null : Math.Round(reader.GetDouble(1), 1);
+            if (reader.IsDBNull(2))
+            {
+                continue;   // the placeholder row: nothing approved yet
+            }
+
+            items.Add(new PublicReviewDto(
+                reader.GetInt64(2),
+                reader.GetInt16(3),
+                reader.GetString(4),
+                FirstNameOf(reader.IsDBNull(5) ? null : reader.GetString(5)),
+                reader.GetDateTime(6)));
+        }
+
+        return Results.Ok(new ReviewSummaryDto(average, count, items));
+    }
+
+    /// <summary>A reviewer is identified by their first name only; the rest is not public.</summary>
+    private static string FirstNameOf(string? name)
+    {
+        var trimmed = name?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return "A customer";
+        }
+
+        var space = trimmed.IndexOf(' ');
+        return space > 0 ? trimmed[..space] : trimmed;
+    }
+
+    // ------------------------------------------------------------------ customer: write one
+    private static async Task<IResult> Submit(
+        string citySlug,
+        string localitySlug,
+        string slug,
+        SubmitReviewRequest request,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        CancellationToken ct)
+    {
+        if (!MeEndpoints.TryGetUserId(principal, out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var validation = ReviewValidator.Validate(new ReviewInput(request.Rating, request.Body));
+        if (validation.Value is not { } review)
+        {
+            return Results.ValidationProblem(validation.Errors);
+        }
+
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // D11: the reviewer must have verified a phone number. Every user reaches the site through
+        // the OTP flow, so this is belt and braces against a future path that does not.
+        await using (var verified = new NpgsqlCommand(
+            "SELECT phone_verified_at IS NOT NULL FROM users WHERE id = @id AND status = 'active'", conn, tx))
+        {
+            verified.Parameters.AddWithValue("id", userId);
+            if (await verified.ExecuteScalarAsync(ct) is not true)
+            {
+                return Results.Problem(
+                    "Verify your mobile number before writing a review.",
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+        }
+
+        long listingId;
+        bool ownsIt;
+        await using (var find = new NpgsqlCommand(
+            @"SELECT li.id,
+                     EXISTS (SELECT 1 FROM business_members bm
+                             WHERE bm.business_id = li.business_id AND bm.user_id = @user)
+              FROM listings li
+              JOIN localities lo ON lo.id = li.locality_id
+              JOIN cities ci ON ci.id = lo.city_id
+              WHERE ci.slug = @city AND lo.slug = @locality AND li.slug = @slug AND li.status = 'active'", conn, tx))
+        {
+            find.Parameters.AddWithValue("city", citySlug);
+            find.Parameters.AddWithValue("locality", localitySlug);
+            find.Parameters.AddWithValue("slug", slug);
+            find.Parameters.AddWithValue("user", userId);
+            await using var reader = await find.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                return Results.NotFound();
+            }
+            listingId = reader.GetInt64(0);
+            ownsIt = reader.GetBoolean(1);
+        }
+
+        // Reviewing your own business is the most obvious way to manufacture a rating.
+        if (ownsIt)
+        {
+            return Results.Problem(
+                "You cannot review a business you manage.",
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+
+        try
+        {
+            await using var insert = new NpgsqlCommand(
+                @"INSERT INTO reviews (listing_id, user_id, rating, body)
+                  VALUES (@listing, @user, @rating, @body)
+                  RETURNING id", conn, tx);
+            insert.Parameters.AddWithValue("listing", listingId);
+            insert.Parameters.AddWithValue("user", userId);
+            insert.Parameters.AddWithValue("rating", review.Rating);
+            insert.Parameters.AddWithValue("body", review.Body);
+            var id = (long)(await insert.ExecuteScalarAsync(ct))!;
+            await tx.CommitAsync(ct);
+
+            // 202, not 201: it exists, but nothing is public until a moderator approves it.
+            return Results.Accepted($"/api/v1/me/reviews", new { id, status = "pending" });
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            // The unique constraint, not an API check, is what makes one-per-person true.
+            return Results.Problem(
+                "You have already reviewed this business.",
+                statusCode: StatusCodes.Status409Conflict);
+        }
+    }
+
+    // ------------------------------------------------------------------ customer: see their own
+    private static async Task<IResult> ListMine(ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    {
+        if (!MeEndpoints.TryGetUserId(principal, out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        await using var command = db.CreateCommand(
+            @"SELECT r.id, r.listing_id, li.name, ci.slug, lo.slug, pc.slug, li.slug,
+                     r.rating, r.body, r.status, r.moderation_note, r.created_at
+              FROM reviews r
+              JOIN listings li ON li.id = r.listing_id
+              JOIN localities lo ON lo.id = li.locality_id
+              JOIN cities ci ON ci.id = lo.city_id
+              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary
+              JOIN categories pc ON pc.id = lc.category_id
+              WHERE r.user_id = @user
+              ORDER BY r.created_at DESC");
+        command.Parameters.AddWithValue("user", userId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var items = new List<MyReviewDto>();
+        while (await reader.ReadAsync(ct))
+        {
+            items.Add(new MyReviewDto(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.GetString(2),
+                $"/{reader.GetString(3)}/{reader.GetString(4)}/{reader.GetString(5)}/{reader.GetString(6)}",
+                reader.GetInt16(7),
+                reader.GetString(8),
+                reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.GetDateTime(11)));
+        }
+
+        return Results.Ok(items);
+    }
+
+    // ------------------------------------------------------------------ admin: moderate
+    private static async Task<IResult> ListForModeration(
+        string? status,
+        int? page,
+        ClaimsPrincipal principal,
+        NpgsqlDataSource db,
+        CancellationToken ct)
+    {
+        var admin = await AdminAccess.Load(db, principal, ct);
+        if (admin is null)
+        {
+            return Results.Unauthorized();
+        }
+        if (AdminAccess.Authorize(admin, AdminPermissions.ReportsHandle) is { } refusal)
+        {
+            return refusal;
+        }
+
+        var wanted = status?.Trim().ToLowerInvariant() ?? "pending";
+        if (wanted is not ("pending" or "approved" or "rejected"))
+        {
+            return Results.Problem("Unknown status filter.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var currentPage = Math.Max(page ?? 1, 1);
+
+        await using var command = db.CreateCommand(
+            @"WITH matching AS (
+                  SELECT r.id, r.listing_id, li.name AS listing_name, r.rating, r.body,
+                         u.phone_e164, r.created_at
+                  FROM reviews r
+                  JOIN listings li ON li.id = r.listing_id
+                  JOIN users u ON u.id = r.user_id
+                  WHERE r.status = @status
+              ),
+              page AS (
+                  SELECT * FROM matching ORDER BY created_at LIMIT @size OFFSET @offset
+              )
+              SELECT (SELECT count(*) FROM matching),
+                     p.id, p.listing_id, p.listing_name, p.rating, p.body, p.phone_e164, p.created_at
+              FROM (SELECT 1) AS always_one_row
+              LEFT JOIN page p ON true
+              ORDER BY p.created_at");
+        command.Parameters.AddWithValue("status", wanted);
+        command.Parameters.AddWithValue("size", ModerationPageSize);
+        command.Parameters.AddWithValue("offset", (currentPage - 1) * ModerationPageSize);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var items = new List<ModerationReviewDto>();
+        var total = 0;
+        while (await reader.ReadAsync(ct))
+        {
+            total = (int)reader.GetInt64(0);
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            items.Add(new ModerationReviewDto(
+                reader.GetInt64(1),
+                reader.GetInt64(2),
+                reader.GetString(3),
+                reader.GetInt16(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetDateTime(7)));
+        }
+
+        var totalPages = (int)Math.Ceiling(total / (double)ModerationPageSize);
+        return Results.Ok(new ModerationPage(items, currentPage, ModerationPageSize, total, totalPages));
+    }
+
+    private static Task<IResult> Approve(
+        long id,
+        DecisionRequest request,
+        ClaimsPrincipal principal,
+        HttpContext http,
+        NpgsqlDataSource db,
+        CancellationToken ct) =>
+        Decide(id, "approved", request.Note, principal, http, db, ct);
+
+    private static Task<IResult> Reject(
+        long id,
+        DecisionRequest request,
+        ClaimsPrincipal principal,
+        HttpContext http,
+        NpgsqlDataSource db,
+        CancellationToken ct) =>
+        Decide(id, "rejected", request.Note, principal, http, db, ct);
+
+    private static async Task<IResult> Decide(
+        long id,
+        string status,
+        string? note,
+        ClaimsPrincipal principal,
+        HttpContext http,
+        NpgsqlDataSource db,
+        CancellationToken ct)
+    {
+        var admin = await AdminAccess.Load(db, principal, ct);
+        if (admin is null)
+        {
+            return Results.Unauthorized();
+        }
+        if (AdminAccess.Authorize(admin, AdminPermissions.ReportsHandle) is { } refusal)
+        {
+            return refusal;
+        }
+
+        var trimmedNote = note?.Trim();
+        if (trimmedNote is { Length: 0 })
+        {
+            trimmedNote = null;
+        }
+        if (trimmedNote is { Length: > 1000 })
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["note"] = ["Note must be 1000 characters or fewer."],
+            });
+        }
+
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // Only a pending review can be decided, so two moderators cannot both record a decision.
+        await using (var update = new NpgsqlCommand(
+            @"UPDATE reviews
+              SET status = @status, moderation_note = @note, moderated_at = now(),
+                  moderated_by_admin_id = @admin, updated_at = now()
+              WHERE id = @id AND status = 'pending'
+              RETURNING id", conn, tx))
+        {
+            update.Parameters.AddWithValue("status", status);
+            update.Parameters.Add(new NpgsqlParameter("note", NpgsqlDbType.Text) { Value = (object?)trimmedNote ?? DBNull.Value });
+            update.Parameters.AddWithValue("admin", admin.Id);
+            update.Parameters.AddWithValue("id", id);
+            if (await update.ExecuteScalarAsync(ct) is null)
+            {
+                return Results.NotFound();
+            }
+        }
+
+        await using (var audit = new NpgsqlCommand(
+            @"INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, ip)
+              VALUES ('admin', @admin, @action, 'review', @entity, @ip)", conn, tx))
+        {
+            IPAddress? ip = http.Connection.RemoteIpAddress;
+            audit.Parameters.AddWithValue("admin", admin.Id);
+            audit.Parameters.AddWithValue("action", status == "approved" ? "review.approved" : "review.rejected");
+            audit.Parameters.AddWithValue("entity", id.ToString());
+            audit.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+            await audit.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return Results.NoContent();
+    }
+}

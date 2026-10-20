@@ -23,6 +23,7 @@ public static class AdminEndpoints
         var group = app.MapGroup("/api/v1/admin").RequireAuthorization(AdminAccess.Policy);
         group.MapGet("/me", GetMe);
         group.MapAdminListingEndpoints();
+        group.MapAdminReviewEndpoints();
         return group;
     }
 

@@ -79,6 +79,24 @@ export async function searchListings(criteria: SearchCriteria): Promise<SearchRe
   return results ?? { items: [], page: 1, pageSize: 0, total: 0, totalPages: 0 };
 }
 
+/** One approved review. The author is a first name only; nothing else is public. */
+export type PublicReview = {
+  id: number;
+  rating: number;
+  body: string;
+  authorName: string;
+  createdAt: string;
+};
+
+/** `average` is null when nothing has been approved yet, rather than 0, which would read as "rated zero". */
+export type ReviewSummary = { average: number | null; count: number; items: PublicReview[] };
+
+export async function getReviews(citySlug: string, localitySlug: string, slug: string): Promise<ReviewSummary> {
+  const path = [citySlug, localitySlug, slug].map(encodeURIComponent).join("/");
+  const summary = await getJson<ReviewSummary>(`/api/v1/public/listings/${path}/reviews`, 60);
+  return summary ?? { average: null, count: 0, items: [] };
+}
+
 export type EnquiryFailure = { ok: false; message: string; fieldErrors: Record<string, string> };
 export type EnquiryResult = { ok: true } | EnquiryFailure;
 

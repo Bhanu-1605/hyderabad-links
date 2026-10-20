@@ -23,8 +23,11 @@ All run locally and observed, not assumed:
 | Check | Result |
 |---|---|
 | `npm run verify` (migration check, script tests, typecheck, 3 production builds, .NET build + tests) | **passed** |
-| .NET unit tests | **314 passed**, 0 failed |
-| .NET integration tests | **89 passed**, 0 failed |
+| .NET unit tests | **333 passed**, 0 failed |
+| .NET integration tests | **94 passed**, 0 failed |
+| `database/checks/review_smoke.sql` | **passed** (9 assertions: pending on arrival, one per person, every CHECK constraint, average over approved rows only, a decided review cannot be re-decided, cascade) |
+| Reviews against the running API | **works** — anonymous refused; validation; **an owner cannot review their own business (403)**; a duplicate is refused by the constraint (409); nothing public until approved (`average: null`, not 0); the admin queue, approve, and a second decision answering 404; an audit row written |
+| Reviews on the public page | **works** — average 4.0, the reviewer shown by first name only, and a sign-in prompt for an anonymous visitor |
 | `database/checks/enquiry_smoke.sql` | **passed** (isolation, the ownership-scoped UPDATE, all four CHECK constraints, cascade on listing delete) |
 | Enquiries against the running API | **works** — validation and normalisation, 404 for a listing that is not live, two real owners proving one never sees the other's enquiries (and a cross-owner status change answering 404, not 403), status filters, and the per-IP-per-listing daily cap |
 | Enquiries in a real browser | **works** — sent from a listing page with the form replaced by a confirmation; the rate-limit message rendered when the cap was hit; the owner's inbox showed it, and "Mark replied" persisted and cleared the unread badge |
@@ -376,6 +379,29 @@ so a missed call was a lost customer. An enquiry is a row the owner can work thr
 **No notification is sent when an enquiry arrives.** There is no email or SMS provider configured,
 and telling the owner we had messaged them would be worse than them finding it in the dashboard.
 That is the next thing this feature needs.
+
+### Customer reviews and ratings (V0007, decision D11)
+
+D11 required phone-verified reviewers plus moderation, and both are enforced rather than assumed.
+
+- `POST /api/v1/me/reviews/{city}/{locality}/{slug}` — signed in only. Checks `phone_verified_at`,
+  refuses a reviewer who **manages that business** (the most obvious way to manufacture a rating),
+  and relies on a unique constraint for one-review-per-person so a double submit or a race cannot
+  produce two. Returns **202, not 201**: the review exists but nothing is public yet.
+- `GET /api/v1/public/listings/{city}/{locality}/{slug}/reviews` — approved reviews and the
+  average, computed over exactly the set the visitor can read, so the number and the list cannot
+  disagree. The average is `null` when nothing is approved, never 0, which would read as "rated
+  zero". Reviewers appear by **first name only**.
+- `GET /api/v1/me/reviews` — a reviewer sees their own, including a rejection note.
+- `GET /api/v1/admin/reviews`, `POST .../approve`, `POST .../reject` — gated on the existing
+  `reports.handle` permission, whose seeded description already covers reviews, so **no new
+  permission or migration was needed**. Only a *pending* review can be decided, so two moderators
+  cannot both record an outcome, and each decision writes an audit row.
+- Public reviews section and a submission form on the listing page.
+
+**Not built:** no admin *UI* for review moderation yet — the endpoints exist and are tested, but a
+moderator currently needs to call them directly. Abuse reporting (flagging a published review) is
+also still absent.
 
 ## Not built yet
 
