@@ -5,7 +5,7 @@ namespace BusinessDirectory.IntegrationTests;
 
 // The overview reports an owner's own figures, so it must refuse anonymous callers. Like the other
 // integration tests here it needs no database; the counting itself, including that one owner's
-// numbers never include another's listings, is covered by database/checks/owner_overview_smoke.sql.
+// numbers never include another's listings, is covered by database/sqlserver/checks/owner_overview_smoke.sql.
 public class OwnerOverviewAccessTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client = factory.CreateClient();

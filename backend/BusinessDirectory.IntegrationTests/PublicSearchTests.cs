@@ -5,7 +5,7 @@ namespace BusinessDirectory.IntegrationTests;
 
 // Request validation for /api/v1/public/listings/search. Like the other integration tests here,
 // these need no database: they prove the endpoint refuses bad input before it reaches SQL.
-// The result shapes themselves are checked against real data by database/checks/search_smoke.sql.
+// The result shapes themselves are checked against real data by database/sqlserver/checks/search_smoke.sql.
 public class PublicSearchTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private const string Search = "/api/v1/public/listings/search";

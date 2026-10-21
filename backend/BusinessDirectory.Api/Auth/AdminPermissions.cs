@@ -1,7 +1,7 @@
 namespace BusinessDirectory.Api.Auth;
 
 /// <summary>
-/// The permission codes seeded by database/seeds/reference/R003_roles_permissions.sql, split by which
+/// The permission codes seeded by database/sqlserver/seeds/reference/R003_roles_permissions.sql, split by which
 /// surface may check them. Endpoints name a constant from here instead of a loose string, so a typo is a
 /// build error rather than a permission that silently never matches.
 ///

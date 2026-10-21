@@ -12,7 +12,7 @@ namespace BusinessDirectory.IntegrationTests;
 // the handler, so refusals are testable here; the sign-in *outcomes* are not. Those were verified
 // against the running API (uniform failure message, lockout after five wrong passwords, lockout
 // after five wrong codes, replay refused, recovery code single-use) and the storage rules live in
-// database/checks/admin_mfa_smoke.sql. Asserting them here would only prove a 500.
+// database/sqlserver/checks/admin_mfa_smoke.sql. Asserting them here would only prove a 500.
 public class AdminMfaAccessTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client = factory.CreateClient();

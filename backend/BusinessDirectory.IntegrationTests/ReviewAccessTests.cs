@@ -10,7 +10,7 @@ namespace BusinessDirectory.IntegrationTests;
 // These run with no database, so only the authorization boundary is testable here. The rules that
 // need real rows — owner cannot review their own business, one review per person, nothing public
 // until approved, a decided review cannot be decided twice — were verified against the running API
-// and are covered by database/checks/review_smoke.sql.
+// and are covered by database/sqlserver/checks/review_smoke.sql.
 public class ReviewAccessTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client = factory.CreateClient();

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "description": "HYDERABAD LINKS monorepo: three Next.js websites, one ASP.NET Core API, one Microsoft SQL Server database.",
-    "engines": {
+  "engines": {
     "node": ">=22"
   },
   "workspaces": [
@@ -18,6 +18,7 @@
     "dev:super-admin": "npm run dev -w apps/super-admin-website",
     "db:migrate": "dotnet run --project backend/BusinessDirectory.Api -- migrate",
     "db:seed-dev": "dotnet run --project backend/BusinessDirectory.Api -- seed-dev",
+    "db:check": "node scripts/run-db-checks.mjs",
     "dev:api": "dotnet run --project backend/BusinessDirectory.Api",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
