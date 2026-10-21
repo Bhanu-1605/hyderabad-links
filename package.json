@@ -3,9 +3,15 @@
   "private": true,
   "version": "0.0.0",
   "description": "HYDERABAD LINKS monorepo: three Next.js websites, one ASP.NET Core API, one Microsoft SQL Server database.",
-  "engines": {
+    "engines": {
     "node": ">=22"
   },
+  "workspaces": [
+    "apps/main-website",
+    "apps/admin-website",
+    "apps/super-admin-website",
+    "packages/*"
+  ],
   "scripts": {
     "dev:main": "npm run dev -w apps/main-website",
     "dev:admin": "npm run dev -w apps/admin-website",
