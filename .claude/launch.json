@@ -2,6 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     { "name": "main-website", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev:main"], "port": 3000 },
-    { "name": "admin-website", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev:admin"], "port": 3001 }
+    { "name": "admin-website", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev:admin"], "port": 3001 },
+    { "name": "super-admin-website", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev:super-admin"], "port": 3002 }
   ]
 }

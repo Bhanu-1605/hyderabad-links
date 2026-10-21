@@ -52,7 +52,7 @@ public class EnquiryAccessTests(WebApplicationFactory<Program> factory) : IClass
         Assert.Contains("phone", body);
         Assert.Contains("message", body);
         // Nothing internal leaks in the problem response.
-        Assert.DoesNotContain("Npgsql", body);
+        Assert.DoesNotContain("SqlClient", body);
         Assert.DoesNotContain("INSERT", body);
     }
 }

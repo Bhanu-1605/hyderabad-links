@@ -1,6 +1,7 @@
+using BusinessDirectory.Api.Data;
 using System.Security.Claims;
 using BusinessDirectory.Api.Media;
-using Npgsql;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -58,13 +59,14 @@ public static class OwnerMediaEndpoints
         // antiforgery metadata: this API is authenticated by a bearer token, not by a cookie, so a
         // cross-site form post cannot carry the caller's credentials in the first place.
         group.MapPost("", Upload);
+        group.MapPost("/{mediaId:long}/move", Move);
         group.MapDelete("/{mediaId:long}", Delete);
         return group;
     }
 
     // ------------------------------------------------------------------ list
     private static async Task<IResult> List(
-        long id, ClaimsPrincipal principal, NpgsqlDataSource db, IMediaStorage storage, CancellationToken ct)
+        long id, ClaimsPrincipal principal, SqlDatabase db, IMediaStorage storage, CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
         {
@@ -87,7 +89,7 @@ public static class OwnerMediaEndpoints
         long id,
         HttpRequest request,
         ClaimsPrincipal principal,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         IMediaStorage storage,
         ILogger<OwnerMediaUpload> logger,
         CancellationToken ct)
@@ -155,7 +157,7 @@ public static class OwnerMediaEndpoints
         await using var conn = await db.OpenConnectionAsync(ct);
         // The whole check-and-insert runs in one transaction, and the listing row is locked first, so
         // the count a concurrent upload sees already includes this one.
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         var allowance = await ReadAllowance(conn, tx, userId, id, uploadsAvailable: true, ct);
         if (allowance is null)
@@ -180,12 +182,12 @@ public static class OwnerMediaEndpoints
         }
 
         long mediaId;
-        await using (var insert = new NpgsqlCommand(
+        await using (var insert = new SqlCommand(
             @"INSERT INTO listing_media (listing_id, kind, storage_key, content_type, byte_size, width, height, sort_order, created_by_user_id)
+              OUTPUT inserted.id
               VALUES (@listing, @kind, @key, @type, @size, @width, @height,
                       COALESCE((SELECT max(sort_order) + 1 FROM listing_media WHERE listing_id = @listing AND kind = @kind), 0),
-                      @user)
-              RETURNING id", conn, tx))
+                      @user)", conn, tx))
         {
             insert.Parameters.AddWithValue("listing", id);
             insert.Parameters.AddWithValue("kind", kind.ToString().ToLowerInvariant());
@@ -229,9 +231,116 @@ public static class OwnerMediaEndpoints
             file.Length, size?.Width, size?.Height, 0, false, DateTimeOffset.UtcNow));
     }
 
+    // ------------------------------------------------------------------ reorder
+    /// <summary>
+    /// Moves one photo one place earlier or later, by swapping its position with its neighbour of
+    /// the same kind. A swap rather than a renumbering: it touches two rows, so two owners reordering
+    /// at once cannot leave the gallery in a half-renumbered state.
+    /// </summary>
+    private static async Task<IResult> Move(
+        long id, long mediaId, string? direction, ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
+    {
+        if (!MeEndpoints.TryGetUserId(principal, out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var earlier = direction switch
+        {
+            "up" => true,
+            "down" => false,
+            _ => (bool?)null,
+        };
+        if (earlier is null)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]> { ["direction"] = ["Send up or down."] });
+        }
+
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
+
+        // The business_members join is the authorisation, exactly as in the other handlers.
+        string kind;
+        int sortOrder;
+        await using (var find = new SqlCommand(
+            /* UPDLOCK on the media row only, which is what FOR NO KEY UPDATE OF m said: the
+               listing and the membership are read, not changed. */
+            @"SELECT m.kind, m.sort_order
+              FROM listing_media m WITH (UPDLOCK, ROWLOCK)
+              JOIN listings li ON li.id = m.listing_id
+              JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
+              WHERE m.id = @media AND m.listing_id = @listing", conn, tx))
+        {
+            find.Parameters.AddWithValue("user", userId);
+            find.Parameters.AddWithValue("media", mediaId);
+            find.Parameters.AddWithValue("listing", id);
+            await using var reader = await find.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                return Results.NotFound();
+            }
+            kind = reader.GetString(0);
+            sortOrder = reader.GetInt32(1);
+        }
+
+        long? neighbourId = null;
+        var neighbourOrder = 0;
+        await using (var neighbour = new SqlCommand(
+            /* "the row just before this one, in (sort_order, id) order". PostgreSQL could compare
+               the pair directly -- (sort_order, id) < (@order, @media) -- which SQL Server cannot, so
+               it is written out: a smaller sort_order, or the same one and a smaller id. */
+            $@"SELECT TOP (1) id, sort_order
+               FROM listing_media WITH (UPDLOCK, ROWLOCK)
+               WHERE listing_id = @listing AND kind = @kind
+                 AND (sort_order {(earlier.Value ? "<" : ">")} @order
+                      OR (sort_order = @order AND id {(earlier.Value ? "<" : ">")} @media))
+               ORDER BY sort_order {(earlier.Value ? "DESC" : "ASC")}, id {(earlier.Value ? "DESC" : "ASC")}", conn, tx))
+        {
+            neighbour.Parameters.AddWithValue("listing", id);
+            neighbour.Parameters.AddWithValue("kind", kind);
+            neighbour.Parameters.AddWithValue("order", sortOrder);
+            neighbour.Parameters.AddWithValue("media", mediaId);
+            await using var reader = await neighbour.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
+            {
+                neighbourId = reader.GetInt64(0);
+                neighbourOrder = reader.GetInt32(1);
+            }
+        }
+
+        if (neighbourId is null)
+        {
+            // Already first or last. Not an error: the button simply had nothing to do. The rollback
+            // waits until here because the reader above has to be closed before the connection is
+            // free to carry another statement.
+            await tx.RollbackAsync(ct);
+            return Results.NoContent();
+        }
+
+        // Equal sort_order values can exist (a tie broken by id), and swapping those would change
+        // nothing, so the moved row is pushed past its neighbour instead.
+        var (mine, theirs) = sortOrder == neighbourOrder
+            ? (earlier.Value ? neighbourOrder - 1 : neighbourOrder + 1, neighbourOrder)
+            : (neighbourOrder, sortOrder);
+
+        await using (var update = new SqlCommand(
+            @"UPDATE listing_media SET sort_order = CASE id WHEN @media THEN @mine ELSE @theirs END
+              WHERE id IN (@media, @neighbour)", conn, tx))
+        {
+            update.Parameters.AddWithValue("media", mediaId);
+            update.Parameters.AddWithValue("neighbour", neighbourId.Value);
+            update.Parameters.AddWithValue("mine", mine);
+            update.Parameters.AddWithValue("theirs", theirs);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return Results.NoContent();
+    }
+
     // ------------------------------------------------------------------ delete
     private static async Task<IResult> Delete(
-        long id, long mediaId, ClaimsPrincipal principal, NpgsqlDataSource db, IMediaStorage storage, CancellationToken ct)
+        long id, long mediaId, ClaimsPrincipal principal, SqlDatabase db, IMediaStorage storage, CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
         {
@@ -240,11 +349,14 @@ public static class OwnerMediaEndpoints
 
         // The join is the authorisation: a media id belonging to someone else's listing deletes nothing.
         await using var command = db.CreateCommand(
-            @"DELETE FROM listing_media m
-              USING listings li
+            /* DELETE ... USING becomes "DELETE <alias> FROM ... JOIN ...", and the row being
+               removed is "deleted", not "inserted" -- an OUTPUT on a DELETE has no inserted row. */
+            @"DELETE m
+              OUTPUT deleted.storage_key
+              FROM listing_media m
+              JOIN listings li ON li.id = m.listing_id
               JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
-              WHERE m.id = @media AND m.listing_id = @listing AND li.id = m.listing_id
-              RETURNING m.storage_key");
+              WHERE m.id = @media AND m.listing_id = @listing");
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("media", mediaId);
         command.Parameters.AddWithValue("listing", id);
@@ -272,17 +384,17 @@ public static class OwnerMediaEndpoints
     /// foreign keys that point at the listing (its media, enquiries and reviews).
     /// </summary>
     private static async Task<MediaAllowanceDto?> ReadAllowance(
-        NpgsqlConnection conn, NpgsqlTransaction? tx, long userId, long listingId, bool uploadsAvailable, CancellationToken ct)
+        SqlConnection conn, SqlTransaction? tx, long userId, long listingId, bool uploadsAvailable, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
+        await using var command = new SqlCommand(
             @"SELECT p.slug, p.name, p.photo_limit, p.video_limit, p.logo_limit, p.media_limits_confirmed,
-                     (SELECT count(*) FROM listing_media m WHERE m.listing_id = li.id AND m.kind = 'photo' AND NOT m.is_hidden),
-                     (SELECT count(*) FROM listing_media m WHERE m.listing_id = li.id AND m.kind = 'video' AND NOT m.is_hidden),
-                     (SELECT count(*) FROM listing_media m WHERE m.listing_id = li.id AND m.kind = 'logo' AND NOT m.is_hidden)
-              FROM listings li
+                     (SELECT COUNT_BIG(*) FROM listing_media m WHERE m.listing_id = li.id AND m.kind = 'photo' AND m.is_hidden = 0),
+                     (SELECT COUNT_BIG(*) FROM listing_media m WHERE m.listing_id = li.id AND m.kind = 'video' AND m.is_hidden = 0),
+                     (SELECT COUNT_BIG(*) FROM listing_media m WHERE m.listing_id = li.id AND m.kind = 'logo' AND m.is_hidden = 0)
+              FROM listings li" + (tx is null ? "" : " WITH (UPDLOCK, ROWLOCK)") + @"
               JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
               JOIN plans p ON p.slug = li.plan_slug
-              WHERE li.id = @listing AND li.status <> 'archived'" + (tx is null ? "" : " FOR NO KEY UPDATE OF li"),
+              WHERE li.id = @listing AND li.status <> 'archived'",
             conn, tx);
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("listing", listingId);
@@ -307,9 +419,9 @@ public static class OwnerMediaEndpoints
     }
 
     private static async Task<List<MediaItemDto>> ReadItems(
-        NpgsqlConnection conn, long listingId, IMediaStorage storage, CancellationToken ct)
+        SqlConnection conn, long listingId, IMediaStorage storage, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
+        await using var command = new SqlCommand(
             @"SELECT id, kind, storage_key, content_type, byte_size, width, height, sort_order, is_hidden, created_at
               FROM listing_media
               WHERE listing_id = @listing

@@ -26,6 +26,12 @@ public class OwnerMediaAccessTests(WebApplicationFactory<Program> factory) : ICl
     }
 
     [Fact]
+    public async Task Reordering_requires_sign_in() =>
+        Assert.Equal(
+            HttpStatusCode.Unauthorized,
+            (await _client.PostAsync("/api/v1/me/listings/1/media/1/move?direction=up", null)).StatusCode);
+
+    [Fact]
     public async Task Deleting_requires_sign_in() =>
         Assert.Equal(
             HttpStatusCode.Unauthorized,

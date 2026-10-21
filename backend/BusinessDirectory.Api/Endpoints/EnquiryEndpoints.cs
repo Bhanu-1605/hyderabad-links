@@ -1,8 +1,10 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using System.Security.Claims;
 using BusinessDirectory.Api.Listings;
-using Npgsql;
-using NpgsqlTypes;
+using BusinessDirectory.Api.Notifications;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -28,7 +30,7 @@ public static class EnquiryEndpoints
         string? Email,
         string Message,
         string Status,
-        DateTime CreatedAt);
+        DateTimeOffset CreatedAt);
 
     public sealed record OwnerEnquiryPage(
         IReadOnlyList<OwnerEnquiryDto> Items,
@@ -75,7 +77,8 @@ public static class EnquiryEndpoints
         string slug,
         SendEnquiryRequest request,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
+        Notifier notifier,
         CancellationToken ct)
     {
         var validation = EnquiryValidator.Validate(new EnquiryInput(request.Name, request.Phone, request.Email, request.Message));
@@ -85,13 +88,14 @@ public static class EnquiryEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         // Only a live listing can be contacted: a draft or rejected one is not public, so an enquiry
         // to it would be an enquiry to something the sender cannot have seen.
         long listingId;
-        await using (var find = new NpgsqlCommand(
-            @"SELECT li.id
+        string listingName;
+        await using (var find = new SqlCommand(
+            @"SELECT li.id, li.name
               FROM listings li
               JOIN localities lo ON lo.id = li.locality_id
               JOIN cities ci ON ci.id = lo.city_id
@@ -100,11 +104,13 @@ public static class EnquiryEndpoints
             find.Parameters.AddWithValue("city", citySlug);
             find.Parameters.AddWithValue("locality", localitySlug);
             find.Parameters.AddWithValue("slug", slug);
-            if (await find.ExecuteScalarAsync(ct) is not long found)
+            await using var reader = await find.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
             {
                 return Results.NotFound();
             }
-            listingId = found;
+            listingId = reader.GetInt64(0);
+            listingName = reader.GetString(1);
         }
 
         IPAddress? ip = http.Connection.RemoteIpAddress;
@@ -116,40 +122,77 @@ public static class EnquiryEndpoints
         }
 
         long id;
-        await using (var insert = new NpgsqlCommand(
+        DateTimeOffset receivedAt;
+        await using (var insert = new SqlCommand(
             @"INSERT INTO enquiries (listing_id, name, phone_e164, email, message, ip)
-              VALUES (@listing, @name, @phone, @email, @message, @ip)
-              RETURNING id", conn, tx))
+              OUTPUT inserted.id, inserted.created_at
+              VALUES (@listing, @name, @phone, @email, @message, @ip)", conn, tx))
         {
             insert.Parameters.AddWithValue("listing", listingId);
             insert.Parameters.AddWithValue("name", enquiry.Name);
             insert.Parameters.AddWithValue("phone", enquiry.PhoneE164);
-            insert.Parameters.Add(new NpgsqlParameter("email", NpgsqlDbType.Text) { Value = (object?)enquiry.Email ?? DBNull.Value });
+            insert.Parameters.Add(new SqlParameter("email", SqlDbType.NVarChar) { Value = (object?)enquiry.Email ?? DBNull.Value });
             insert.Parameters.AddWithValue("message", enquiry.Message);
-            insert.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
-            id = (long)(await insert.ExecuteScalarAsync(ct))!;
+            insert.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
+            await using var reader = await insert.ExecuteReaderAsync(ct);
+            await reader.ReadAsync(ct);
+            id = reader.GetInt64(0);
+            receivedAt = reader.GetFieldValue<DateTimeOffset>(1);
+        }
+
+        // Tell the owner, if we have an address for them. The notification row is written here, in
+        // the same transaction as the enquiry, so a stored enquiry always has a record of what we
+        // tried to send about it; the sending itself happens after the commit and is allowed to fail.
+        long? notificationId = null;
+        EmailMessage? email = null;
+        var owner = await OwnerLookup.ForListing(conn, tx, listingId, ct);
+        if (owner is not null)
+        {
+            notificationId = await Notifier.RecordPendingEmailAsync(
+                conn, tx, NotificationKinds.EnquiryReceived, owner.Email, owner.UserId, "enquiry", id, ct);
+            email = EmailTemplates.NewEnquiryEmail(
+                owner.Email,
+                new EmailTemplates.NewEnquiry(
+                    listingName,
+                    enquiry.Name,
+                    enquiry.PhoneE164,
+                    enquiry.Email,
+                    enquiry.Message,
+                    receivedAt,
+                    ListingPath: null),
+                notifier.SiteBaseUrl);
         }
 
         await tx.CommitAsync(ct);
 
-        // No notification is sent: there is no email or SMS provider configured yet, and claiming to
-        // have told the owner would be worse than the owner finding it in their dashboard.
+        // After the commit on purpose. The customer's enquiry is recorded either way: if delivery
+        // fails the notification row says so, and the sender still gets their 201.
+        if (notificationId is not null)
+        {
+            await notifier.DeliverAsync(conn, notificationId.Value, email!, ct);
+        }
+
         return Results.Created($"/api/v1/public/enquiries/{id}", new SentDto(id));
     }
 
     private static async Task<bool> IsRateLimited(
-        NpgsqlConnection conn,
-        NpgsqlTransaction tx,
+        SqlConnection conn,
+        SqlTransaction tx,
         IPAddress ip,
         long listingId,
         CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
-            @"SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour'),
-                     count(*) FILTER (WHERE created_at > now() - interval '1 day' AND listing_id = @listing)
+        await using var command = new SqlCommand(
+            /* PostgreSQL's count(*) FILTER (WHERE ...) becomes a SUM over a CASE: count every row
+               the condition holds for, and nothing else. The CAST makes the result a bigint, which
+               is what count(*) gave before and what the reader below expects. SUM over no rows at
+               all is NULL, where count(*) was 0, so COALESCE puts that back: the first enquiry from
+               an address must not fail on a null. */
+            @"SELECT COALESCE(SUM(CAST(CASE WHEN created_at > DATEADD(hour, -1, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END AS bigint)), 0),
+                     COALESCE(SUM(CAST(CASE WHEN created_at > DATEADD(day, -1, SYSDATETIMEOFFSET()) AND listing_id = @listing THEN 1 ELSE 0 END AS bigint)), 0)
               FROM enquiries
               WHERE ip = @ip", conn, tx);
-        command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = ip });
+        command.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = ip.ToString() });
         command.Parameters.AddWithValue("listing", listingId);
 
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -163,7 +206,7 @@ public static class EnquiryEndpoints
         int? page,
         int? pageSize,
         ClaimsPrincipal principal,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -191,19 +234,19 @@ public static class EnquiryEndpoints
                   JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
               ),
               filtered AS (
-                  SELECT * FROM owned WHERE @status::text IS NULL OR status = @status
+                  SELECT * FROM owned WHERE @status IS NULL OR status = @status
               ),
               page AS (
-                  SELECT * FROM filtered ORDER BY created_at DESC, id DESC LIMIT @size OFFSET @offset
+                  SELECT * FROM filtered ORDER BY created_at DESC, id DESC OFFSET @offset ROWS FETCH NEXT @size ROWS ONLY
               )
-              SELECT (SELECT count(*) FROM filtered),
-                     (SELECT count(*) FROM owned WHERE status = 'new'),
+              SELECT (SELECT COUNT_BIG(*) FROM filtered),
+                     (SELECT COUNT_BIG(*) FROM owned WHERE status = 'new'),
                      p.id, p.listing_id, p.listing_name, p.name, p.phone_e164, p.email,
                      p.message, p.status, p.created_at
-              FROM (SELECT 1) AS always_one_row
-              LEFT JOIN page p ON true
+              FROM (SELECT 1 AS one) AS always_one_row
+              LEFT JOIN page p ON 1 = 1
               ORDER BY p.created_at DESC, p.id DESC");
-        command.Parameters.Add(new NpgsqlParameter("status", NpgsqlDbType.Text) { Value = (object?)wanted ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("status", SqlDbType.NVarChar) { Value = (object?)wanted ?? DBNull.Value });
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("size", size);
         command.Parameters.AddWithValue("offset", (currentPage - 1) * size);
@@ -230,7 +273,7 @@ public static class EnquiryEndpoints
                 reader.IsDBNull(7) ? null : reader.GetString(7),
                 reader.GetString(8),
                 reader.GetString(9),
-                reader.GetDateTime(10)));
+                reader.GetFieldValue<DateTimeOffset>(10)));
         }
 
         var totalPages = (int)Math.Ceiling(total / (double)size);
@@ -242,7 +285,7 @@ public static class EnquiryEndpoints
         long id,
         UpdateStatusRequest request,
         ClaimsPrincipal principal,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -262,12 +305,15 @@ public static class EnquiryEndpoints
         // The ownership join is part of the UPDATE, so an id belonging to someone else matches no row
         // and answers 404 — the same answer as an id that does not exist, which tells a prober nothing.
         await using var command = db.CreateCommand(
-            @"UPDATE enquiries e
-              SET status = @status, updated_at = now()
-              FROM listings li
-              JOIN business_members bm ON bm.business_id = li.business_id
-              WHERE e.id = @id AND li.id = e.listing_id AND bm.user_id = @user
-              RETURNING e.id");
+            /* The clause order is fixed in SQL Server: SET, then OUTPUT, then the FROM that joins
+               in the tables the WHERE needs. PostgreSQL put RETURNING at the end. */
+            @"UPDATE e
+              SET status = @status, updated_at = SYSDATETIMEOFFSET()
+              OUTPUT inserted.id
+              FROM enquiries e
+              JOIN listings li ON li.id = e.listing_id
+              JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
+              WHERE e.id = @id");
         command.Parameters.AddWithValue("status", status);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("user", userId);

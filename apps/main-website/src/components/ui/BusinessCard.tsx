@@ -1,8 +1,7 @@
 import Link from "next/link";
 
 /**
- * Initials for the circular logo. There is no media table yet, so every business shows a
- * monogram; when logos exist this is what they replace.
+ * Initials for the circular logo, used for a business that has not uploaded one.
  */
 export function initialsOf(name: string): string {
   const words = name
@@ -22,6 +21,8 @@ type Props = {
   name: string;
   categoryName: string;
   href: string;
+  /** The uploaded logo or first photo. Null or missing falls back to the monogram. */
+  imageUrl?: string | null;
   /** `dark` is the band with the near-black background; `light` is a white section. */
   tone?: "dark" | "light";
 };
@@ -31,7 +32,7 @@ type Props = {
  * results page is meant to adopt it, so the name ribbon and the monogram live here rather than on
  * either page.
  */
-export function BusinessCard({ name, categoryName, href, tone = "light" }: Props) {
+export function BusinessCard({ name, categoryName, href, imageUrl, tone = "light" }: Props) {
   const onDark = tone === "dark";
   return (
     <Link
@@ -45,13 +46,23 @@ export function BusinessCard({ name, categoryName, href, tone = "light" }: Props
             : "border-[6px] border-white bg-[radial-gradient(circle_at_32%_25%,#fff,#e7f2f3)] shadow-[0_5px_24px_#0b4c5b26] lg:border-8"
         }`}
       >
-        <span
-          className={`grid h-[65%] w-[65%] place-items-center rounded-full border-2 border-brand-200 text-3xl font-black tracking-tighter lg:text-[clamp(32px,4vw,54px)] ${
-            onDark ? "bg-white text-[#153c44]" : "bg-brand-50 text-brand-700"
-          }`}
-        >
-          {initialsOf(name)}
-        </span>
+        {imageUrl ? (
+          /* Decorative: the business name is printed directly below the card. */
+          <img
+            src={imageUrl}
+            alt=""
+            loading="lazy"
+            className="h-[65%] w-[65%] rounded-full border-2 border-brand-200 bg-white object-cover"
+          />
+        ) : (
+          <span
+            className={`grid h-[65%] w-[65%] place-items-center rounded-full border-2 border-brand-200 text-3xl font-black tracking-tighter lg:text-[clamp(32px,4vw,54px)] ${
+              onDark ? "bg-white text-[#153c44]" : "bg-brand-50 text-brand-700"
+            }`}
+          >
+            {initialsOf(name)}
+          </span>
+        )}
       </div>
       <h3
         className={`mt-4 text-sm leading-snug font-black lg:mt-5 lg:text-base ${

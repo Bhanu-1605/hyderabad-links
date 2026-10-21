@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { deleteListingMedia, uploadListingMedia } from "@/lib/owner-api";
+import { deleteListingMedia, moveListingMedia, uploadListingMedia } from "@/lib/owner-api";
 import type { MediaFormState } from "./form-state";
 
 const KINDS = ["logo", "photo", "video"] as const;
@@ -34,6 +34,21 @@ export async function uploadMediaAction(
 
 export async function deleteMediaAction(listingId: number, mediaId: number): Promise<MediaFormState> {
   const result = await deleteListingMedia(listingId, mediaId);
+  if (!result.ok) {
+    return { rev: 0, message: result.message };
+  }
+
+  revalidatePath(`/account/listings/${listingId}/photos`);
+  return { rev: 0, success: true };
+}
+
+/** Moves one photo within its own kind. */
+export async function moveMediaAction(
+  listingId: number,
+  mediaId: number,
+  direction: "up" | "down",
+): Promise<MediaFormState> {
+  const result = await moveListingMedia(listingId, mediaId, direction);
   if (!result.ok) {
     return { rev: 0, message: result.message };
   }

@@ -1,8 +1,9 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using System.Security.Claims;
 using BusinessDirectory.Api.Listings;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -40,13 +41,13 @@ public static class OwnerListingEndpoints
 
     private const string OwnedListingSelect =
         @"SELECT li.id, li.slug, li.name, li.description, li.address_line, li.pincode, li.phone_primary, li.phone_whatsapp,
-                 li.website_url, ST_Y(li.location::geometry), ST_X(li.location::geometry),
+                 li.website_url, li.location.Lat, li.location.Long,
                  ci.slug, lo.slug, lo.name, pc.slug, pc.name, li.status, li.review_note, li.reviewed_at
           FROM listings li
           JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
           JOIN localities lo ON lo.id = li.locality_id
           JOIN cities ci ON ci.id = lo.city_id
-          JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary
+          JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary = 1
           JOIN categories pc ON pc.id = lc.category_id
           WHERE li.status <> 'archived'";
 
@@ -63,7 +64,7 @@ public static class OwnerListingEndpoints
     }
 
     // ------------------------------------------------------------------ list / get
-    private static async Task<IResult> List(ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> List(ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
         {
@@ -81,7 +82,7 @@ public static class OwnerListingEndpoints
         return Results.Ok(listings);
     }
 
-    private static async Task<IResult> Get(long id, ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> Get(long id, ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
         {
@@ -98,7 +99,7 @@ public static class OwnerListingEndpoints
         ListingInput input,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -107,7 +108,7 @@ public static class OwnerListingEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         var ownerPhone = await GetOwnerPhone(conn, tx, userId, ct);
         if (ownerPhone is null)
@@ -122,8 +123,8 @@ public static class OwnerListingEndpoints
         }
 
         long existing;
-        await using (var count = new NpgsqlCommand(
-            @"SELECT count(*) FROM listings li
+        await using (var count = new SqlCommand(
+            @"SELECT COUNT_BIG(*) FROM listings li
               JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
               WHERE li.status <> 'archived'", conn, tx))
         {
@@ -154,7 +155,7 @@ public static class OwnerListingEndpoints
         {
             var businessId = await ListingWriter.InsertBusiness(conn, tx, value.Name, ct);
 
-            await using (var member = new NpgsqlCommand(
+            await using (var member = new SqlCommand(
                 "INSERT INTO business_members (business_id, user_id, role) VALUES (@business, @user, 'owner')", conn, tx))
             {
                 member.Parameters.AddWithValue("business", businessId);
@@ -168,7 +169,7 @@ public static class OwnerListingEndpoints
 
             await ListingWriter.AddPrimaryCategory(conn, tx, listingId, categoryId.Value, ct);
         }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        catch (SqlException ex) when (SqlErrors.IsUniqueViolation(ex))
         {
             // Two owners picked the same name in the same area at the same moment. Ask the caller to retry.
             return Results.Problem("That name was just taken in this area. Please try again.", statusCode: StatusCodes.Status409Conflict);
@@ -186,7 +187,7 @@ public static class OwnerListingEndpoints
         ListingInput input,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -195,7 +196,7 @@ public static class OwnerListingEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         var ownerPhone = await GetOwnerPhone(conn, tx, userId, ct);
         if (ownerPhone is null)
@@ -240,7 +241,7 @@ public static class OwnerListingEndpoints
         long id,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -249,7 +250,7 @@ public static class OwnerListingEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         var lockResult = await LockOwned(conn, tx, userId, id, ct);
         if (lockResult is null)
@@ -283,8 +284,8 @@ public static class OwnerListingEndpoints
         }
 
         // The old rejection reason goes with the old version: the owner has just changed the listing.
-        await using (var submit = new NpgsqlCommand(
-            "UPDATE listings SET status = 'pending_review', review_note = NULL, updated_at = now() WHERE id = @id", conn, tx))
+        await using (var submit = new SqlCommand(
+            "UPDATE listings SET status = 'pending_review', review_note = NULL, updated_at = SYSDATETIMEOFFSET() WHERE id = @id", conn, tx))
         {
             submit.Parameters.AddWithValue("id", id);
             await submit.ExecuteNonQueryAsync(ct);
@@ -297,7 +298,7 @@ public static class OwnerListingEndpoints
     }
 
     // ------------------------------------------------------------------ helpers
-    private static OwnerListingDto Read(NpgsqlDataReader r)
+    private static OwnerListingDto Read(SqlDataReader r)
     {
         var city = r.GetString(11);
         var locality = r.GetString(12);
@@ -326,9 +327,9 @@ public static class OwnerListingEndpoints
             $"/{city}/{locality}/{category}/{slug}");
     }
 
-    private static async Task<OwnerListingDto?> LoadOwned(NpgsqlConnection conn, NpgsqlTransaction? tx, long userId, long listingId, CancellationToken ct)
+    private static async Task<OwnerListingDto?> LoadOwned(SqlConnection conn, SqlTransaction? tx, long userId, long listingId, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(OwnedListingSelect + " AND li.id = @id", conn, tx);
+        await using var command = new SqlCommand(OwnedListingSelect + " AND li.id = @id", conn, tx);
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("id", listingId);
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -337,37 +338,40 @@ public static class OwnerListingEndpoints
 
     /// <summary>Locks the row so two edits cannot interleave. Returns null if the listing is not the caller's.</summary>
     private static async Task<(string Status, double Latitude, double Longitude)?> LockOwned(
-        NpgsqlConnection conn, NpgsqlTransaction tx, long userId, long listingId, CancellationToken ct)
+        SqlConnection conn, SqlTransaction tx, long userId, long listingId, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
-            @"SELECT li.status, ST_Y(li.location::geometry), ST_X(li.location::geometry)
-              FROM listings li
+        await using var command = new SqlCommand(
+            /* The row is locked as it is read, so two requests for the same one queue rather than
+               both acting on what they saw. PostgreSQL wrote that as FOR UPDATE after the query;
+               SQL Server puts it on the table as a hint. HOLDLOCK keeps it to the end of the
+               transaction, which is what FOR UPDATE did. */
+            @"SELECT li.status, li.location.Lat, li.location.Long
+              FROM listings li WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
               JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
-              WHERE li.id = @id AND li.status <> 'archived'
-              FOR UPDATE OF li", conn, tx);
+              WHERE li.id = @id AND li.status <> 'archived'", conn, tx);
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("id", listingId);
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await reader.ReadAsync(ct) ? (reader.GetString(0), reader.GetDouble(1), reader.GetDouble(2)) : null;
     }
 
-    private static async Task<string?> GetOwnerPhone(NpgsqlConnection conn, NpgsqlTransaction tx, long userId, CancellationToken ct)
+    private static async Task<string?> GetOwnerPhone(SqlConnection conn, SqlTransaction tx, long userId, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand("SELECT phone_e164 FROM users WHERE id = @id AND status = 'active'", conn, tx);
+        await using var command = new SqlCommand("SELECT phone_e164 FROM users WHERE id = @id AND status = 'active'", conn, tx);
         command.Parameters.AddWithValue("id", userId);
         return (string?)await command.ExecuteScalarAsync(ct);
     }
 
-    private static async Task WriteAudit(NpgsqlConnection conn, NpgsqlTransaction tx, long userId, string action, long listingId, HttpContext http, CancellationToken ct)
+    private static async Task WriteAudit(SqlConnection conn, SqlTransaction tx, long userId, string action, long listingId, HttpContext http, CancellationToken ct)
     {
         IPAddress? ip = http.Connection.RemoteIpAddress;
-        await using var command = new NpgsqlCommand(
+        await using var command = new SqlCommand(
             @"INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, ip)
               VALUES ('owner', @user, @action, 'listing', @entity, @ip)", conn, tx);
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("action", action);
         command.Parameters.AddWithValue("entity", listingId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }

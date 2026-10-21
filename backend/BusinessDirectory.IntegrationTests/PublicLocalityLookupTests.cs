@@ -29,7 +29,7 @@ public class PublicLocalityLookupTests(WebApplicationFactory<Program> factory) :
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Contains("q must be at least", body);
-        Assert.DoesNotContain("Npgsql", body);
+        Assert.DoesNotContain("SqlClient", body);
         Assert.DoesNotContain("SELECT", body);
         Assert.DoesNotContain("ILIKE", body);
     }
@@ -50,7 +50,7 @@ public class PublicLocalityLookupTests(WebApplicationFactory<Program> factory) :
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Contains("lat must be between -90 and 90", body);
-        Assert.DoesNotContain("Npgsql", body);
+        Assert.DoesNotContain("SqlClient", body);
         Assert.DoesNotContain("ST_Distance", body);
     }
 }

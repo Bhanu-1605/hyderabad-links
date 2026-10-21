@@ -69,6 +69,8 @@ export const PERMISSION_VIEW = "listings.view";
 export const PERMISSION_REVIEW = "listings.review";
 export const PERMISSION_CREATE = "listings.create";
 export const PERMISSION_EDIT = "listings.edit";
+/** The seeded description of this one already reads "Handle abuse reports and reviews". */
+export const PERMISSION_REPORTS = "reports.handle";
 
 export type ApiFailure = { ok: false; status: number; message: string; fieldErrors: Record<string, string> };
 export type ApiResult<T> = { ok: true; data: T } | ApiFailure;
@@ -165,6 +167,109 @@ export const rejectListing = (id: number, reason: string) =>
   authed<AdminListing>(`/api/v1/admin/listings/${id}/reject`, { method: "POST", body: json({ reason }) });
 
 /** The statuses an admin can filter by, in the order the tabs appear. Mirrors ModerationQueueQuery. */
+/** One review waiting on a moderator. The reviewer is identified by phone, which is not public. */
+export type ModerationReview = {
+  id: number;
+  listingId: number;
+  listingName: string;
+  rating: number;
+  body: string;
+  reviewerPhone: string;
+  createdAt: string;
+};
+
+export type ModerationReviewPage = {
+  items: ModerationReview[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+export const REVIEW_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+export const getReviewQueue = (status: string, page: number) =>
+  authed<ModerationReviewPage>(
+    '/api/v1/admin/reviews?status=' + encodeURIComponent(status) + '&page=' + page,
+  );
+
+export const approveReview = (id: number) =>
+  authed<void>('/api/v1/admin/reviews/' + id + '/approve', {
+    method: 'POST',
+    body: JSON.stringify({ note: null }),
+  });
+
+/** The note is what the reviewer reads, so a rejection should always carry one. */
+export const rejectReview = (id: number, note: string) =>
+  authed<void>('/api/v1/admin/reviews/' + id + '/reject', {
+    method: 'POST',
+    body: JSON.stringify({ note: note.trim() === '' ? null : note.trim() }),
+  });
+
+/** Takes a live listing off the public site. The reason is shown to the owner. */
+export const suspendListing = (id: number, reason: string) =>
+  authed<AdminListing>('/api/v1/admin/listings/' + id + '/suspend', {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+
+export const reinstateListing = (id: number) =>
+  authed<AdminListing>('/api/v1/admin/listings/' + id + '/reinstate', { method: 'POST' });
+
+/** One abuse report. `subjectName` is the business it is about, whichever kind of subject it is. */
+export type AbuseReport = {
+  id: number;
+  subjectType: "listing" | "review";
+  subjectId: number;
+  subjectName: string;
+  reviewBody: string | null;
+  reason: string;
+  details: string | null;
+  status: string;
+  resolutionNote: string | null;
+  createdAt: string;
+};
+
+export type AbuseReportPage = {
+  items: AbuseReport[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+export const REPORT_STATUSES = ["open", "actioned", "dismissed"] as const;
+export type ReportStatus = (typeof REPORT_STATUSES)[number];
+
+/** The API's reason codes, in plain words for the queue. */
+export const REPORT_REASON_LABELS: Record<string, string> = {
+  not_a_real_business: "Not a real business",
+  wrong_details: "The details are wrong",
+  closed_down: "Closed down",
+  offensive_content: "Offensive content",
+  spam: "Spam",
+  other: "Something else",
+};
+
+export const getReportQueue = (status: string, page: number) =>
+  authed<AbuseReportPage>(
+    '/api/v1/admin/reports?status=' + encodeURIComponent(status) + '&page=' + page,
+  );
+
+/** Records that something was done about the subject. Acting on it is a separate, audited action. */
+export const actionReport = (id: number, note: string) =>
+  authed<void>('/api/v1/admin/reports/' + id + '/action', {
+    method: 'POST',
+    body: JSON.stringify({ note: note.trim() === '' ? null : note.trim() }),
+  });
+
+export const dismissReport = (id: number, note: string) =>
+  authed<void>('/api/v1/admin/reports/' + id + '/dismiss', {
+    method: 'POST',
+    body: JSON.stringify({ note: note.trim() === '' ? null : note.trim() }),
+  });
+
 export const QUEUE_STATUSES = ["pending_review", "active", "rejected", "draft", "suspended"] as const;
 
 export function describeStatus(status: string): { label: string; tone: "grey" | "amber" | "green" | "red" } {

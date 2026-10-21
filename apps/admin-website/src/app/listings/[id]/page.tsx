@@ -4,11 +4,12 @@ import { notFound } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { PERMISSION_EDIT, PERMISSION_REVIEW, formatWhen, getAdminProfile, getListing } from "@/lib/admin-api";
 import { DecisionForm } from "./DecisionForm";
+import { LiveStatusForm } from "./LiveStatusForm";
 
 export const metadata: Metadata = { title: "Review listing" };
 export const dynamic = "force-dynamic";
 
-type Props = { params: Promise<{ id: string }>; searchParams: Promise<{ added?: string }> };
+type Props = { params: Promise<{ id: string }>; searchParams: Promise<{ added?: string; live?: string }> };
 
 /** One labelled fact about the listing. */
 function Field({ label, value }: { label: string; value: string | null }) {
@@ -22,7 +23,7 @@ function Field({ label, value }: { label: string; value: string | null }) {
 
 export default async function ReviewListingPage({ params, searchParams }: Props) {
   const { id: rawId } = await params;
-  const { added } = await searchParams;
+  const { added, live } = await searchParams;
   const id = Number.parseInt(rawId, 10);
   if (!Number.isSafeInteger(id) || id < 1) notFound();
 
@@ -80,6 +81,14 @@ export default async function ReviewListingPage({ params, searchParams }: Props)
         </p>
       ) : null}
 
+      {live ? (
+        <p role="status" className="mt-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-900">
+          {live === "suspended"
+            ? "Listing suspended. It is off the public site and the owner can see why."
+            : "Listing put back. It is on the public site again."}
+        </p>
+      ) : null}
+
       {listing.reviewNote ? (
         <p className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <span className="font-semibold">Last rejection reason:</span> {listing.reviewNote}
@@ -134,7 +143,15 @@ export default async function ReviewListingPage({ params, searchParams }: Props)
       </section>
 
       <div className="mt-6">
-        {listing.status !== "pending_review" ? (
+        {listing.status === "active" || listing.status === "suspended" ? (
+          mayReview ? (
+            <LiveStatusForm listingId={listing.id} suspended={listing.status === "suspended"} />
+          ) : (
+            <p className="rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600 shadow-sm">
+              Your account can view listings but not take them off the site.
+            </p>
+          )
+        ) : listing.status !== "pending_review" ? (
           <p className="rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600 shadow-sm">
             This listing is not waiting for review, so there is nothing to decide. Owners can submit a draft or
             rejected listing again themselves.

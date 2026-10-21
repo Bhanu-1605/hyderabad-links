@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ACCESS_COOKIE, REFRESH_COOKIE, accessCookieOptions, refreshCookieOptions } from "@/lib/session-cookies";
 
-// Runs before every moderation page. Admin access tokens last 15 minutes: when the access cookie is gone
+// Runs before every signed-in admin page (listings and reviews). Admin access tokens last 15
+// minutes: when the access cookie is gone
 // but the refresh cookie is still there, swap it for a fresh pair here (the only place that can set
 // cookies before render). Same scheme as the public site's proxy.
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:5080";
@@ -49,4 +50,4 @@ export async function proxy(request: NextRequest) {
   return response;
 }
 
-export const config = { matcher: ["/listings/:path*"] };
+export const config = { matcher: ["/listings/:path*", "/reviews/:path*", "/reports/:path*"] };

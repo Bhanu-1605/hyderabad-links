@@ -1,5 +1,6 @@
+using BusinessDirectory.Api.Data;
 using System.Security.Claims;
-using Npgsql;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -46,17 +47,19 @@ public static class OwnerOverviewEndpoints
               JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
               WHERE li.status <> 'archived'
           )
-          SELECT (SELECT count(*) FROM owned),
-                 (SELECT count(*) FROM owned WHERE status = 'active'),
-                 (SELECT count(*) FROM owned WHERE status = 'pending_review'),
-                 (SELECT count(*) FROM owned WHERE status = 'draft'),
-                 (SELECT count(*) FROM owned WHERE status = 'rejected'),
-                 (SELECT count(*) FROM owned WHERE status = 'suspended'),
-                 (SELECT count(*) FROM owned WHERE btrim(coalesce(description, '')) <> ''),
-                 (SELECT count(*) FROM owned WHERE btrim(coalesce(address_line, '')) <> ''),
-                 u.name IS NOT NULL,
-                 btrim(coalesce(u.email, '')) <> '',
-                 (SELECT count(*)
+          SELECT (SELECT COUNT_BIG(*) FROM owned),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE status = 'active'),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE status = 'pending_review'),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE status = 'draft'),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE status = 'rejected'),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE status = 'suspended'),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE LTRIM(RTRIM(COALESCE(description, ''))) <> ''),
+                 (SELECT COUNT_BIG(*) FROM owned WHERE LTRIM(RTRIM(COALESCE(address_line, ''))) <> ''),
+                 /* SQL Server has no boolean expression type, so a yes/no answer in a SELECT list
+                    has to be made into a bit. PostgreSQL returned these two as booleans. */
+                 CAST(CASE WHEN u.name IS NOT NULL THEN 1 ELSE 0 END AS bit),
+                 CAST(CASE WHEN LTRIM(RTRIM(COALESCE(u.email, ''))) <> '' THEN 1 ELSE 0 END AS bit),
+                 (SELECT COUNT_BIG(*)
                   FROM enquiries e
                   JOIN listings el ON el.id = e.listing_id
                   JOIN business_members ebm ON ebm.business_id = el.business_id AND ebm.user_id = @user
@@ -89,7 +92,7 @@ public static class OwnerOverviewEndpoints
         return new ProfileCompletionDto(steps.Count(step => step.Done), steps.Count, steps);
     }
 
-    private static async Task<IResult> GetOverview(ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetOverview(ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
         {

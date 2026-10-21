@@ -7,8 +7,8 @@ Source of truth for scope. Full original brief is held by the project owner; thi
 - Public domain: hyderabadlinks.com. Admin and super-admin domains **not decided**: must stay configurable.
 
 ## Hard constraints
-- Next.js (App Router) + React + TypeScript + Tailwind; ASP.NET Core Web API (C#); PostgreSQL + Npgsql + raw SQL + PostGIS; **no ORM**.
-- Azure: App Service, PostgreSQL Flexible Server, Blob Storage, Key Vault, Application Insights. GitHub + GitHub Actions.
+- Next.js (App Router) + React + TypeScript + Tailwind; ASP.NET Core Web API (C#); Microsoft SQL Server / Azure SQL + Microsoft.Data.SqlClient + raw parameterized SQL; **no ORM**.
+- Azure: App Service, Azure SQL Database, Blob Storage, Key Vault, Application Insights. GitHub + GitHub Actions.
 - Modular monolith. No Kubernetes / microservices without demonstrated need.
 - Three separate Next.js apps (main, admin, super-admin), independently deployable, one API, one database.
 - Browsers never connect to the database; all changes go through authorised API endpoints; permissions enforced on the server.

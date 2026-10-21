@@ -1,6 +1,7 @@
+using BusinessDirectory.Api.Data;
 using System.Security.Claims;
 using BusinessDirectory.Api.Auth;
-using Npgsql;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -24,6 +25,7 @@ public static class AdminEndpoints
         group.MapGet("/me", GetMe);
         group.MapAdminListingEndpoints();
         group.MapAdminReviewEndpoints();
+        group.MapAdminReportEndpoints();
         return group;
     }
 
@@ -31,7 +33,7 @@ public static class AdminEndpoints
     /// Who the caller is and what they may do. The admin site uses this to decide which buttons to draw,
     /// but drawing a button is never the control: each endpoint checks the permission again.
     /// </summary>
-    private static async Task<IResult> GetMe(ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetMe(ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
     {
         var admin = await AdminAccess.Load(db, principal, ct);
         if (admin is null)

@@ -70,6 +70,15 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: "/account/favourites",
+    label: "Saved",
+    icon: (
+      <svg {...iconProps}>
+        <path d="M12 20s-7-4.4-7-9.2A3.8 3.8 0 0 1 12 8a3.8 3.8 0 0 1 7 2.8C19 15.6 12 20 12 20Z" />
+      </svg>
+    ),
+  },
+  {
     href: "/account/profile",
     label: "Business Profile",
     icon: (

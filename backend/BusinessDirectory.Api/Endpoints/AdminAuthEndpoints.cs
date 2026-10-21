@@ -1,8 +1,9 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using System.Text.Json;
 using BusinessDirectory.Api.Auth;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -21,7 +22,16 @@ public static class AdminAuthEndpoints
 
     public sealed record RefreshRequest(string? RefreshToken);
 
-    public sealed record SessionDto(string AccessToken, string RefreshToken, int ExpiresInSeconds);
+/// <param name="SuperAdminAccessToken">
+    /// Only present for an account that holds <c>admins.manage</c>, and only usable on
+    /// /api/v1/super-admin, because it carries a different audience. The super-admin website signs in
+    /// through this same flow and uses this token; the admin website ignores it.
+    /// </param>
+    public sealed record SessionDto(
+        string AccessToken,
+        string RefreshToken,
+        int ExpiresInSeconds,
+        string? SuperAdminAccessToken = null);
 
     /// <summary>
     /// What a correct password alone earns: not a session, but a short-lived token for the second
@@ -49,7 +59,7 @@ public static class AdminAuthEndpoints
     private static async Task<IResult> Login(
         LoginRequest request,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         AuthSettings settings,
         TokenService tokens,
         CancellationToken ct)
@@ -62,7 +72,7 @@ public static class AdminAuthEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         long adminId;
         string? storedHash;
@@ -70,12 +80,18 @@ public static class AdminAuthEndpoints
         int failedCount;
         bool locked;
         bool totpEnabled;
-        await using (var find = new NpgsqlCommand(
-            @"SELECT id, password_hash, status, failed_login_count, COALESCE(locked_until > now(), false),
-                     totp_enabled_at IS NOT NULL
-              FROM admin_users
-              WHERE email = @email
-              FOR UPDATE", conn, tx))
+        await using (var find = new SqlCommand(
+            /* The row is locked as it is read, so two requests for the same one queue rather than
+               both acting on what they saw. PostgreSQL wrote that as FOR UPDATE after the query;
+               SQL Server puts it on the table as a hint. HOLDLOCK keeps it to the end of the
+               transaction, which is what FOR UPDATE did. */
+            /* The two yes/no columns are CASTs for the same reason as everywhere else: SQL Server
+               has no boolean, so a condition in a SELECT list has to be made into a bit. */
+            @"SELECT id, password_hash, status, failed_login_count,
+                     CAST(CASE WHEN locked_until > SYSDATETIMEOFFSET() THEN 1 ELSE 0 END AS bit),
+                     CAST(CASE WHEN totp_enabled_at IS NOT NULL THEN 1 ELSE 0 END AS bit)
+              FROM admin_users WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
+              WHERE email = @email", conn, tx))
         {
             find.Parameters.AddWithValue("email", email);
             await using var reader = await find.ExecuteReaderAsync(ct);
@@ -102,13 +118,13 @@ public static class AdminAuthEndpoints
             if (!locked && status == "active")
             {
                 // Count the failure and lock the account once the allowance is used up.
-                await using var bump = new NpgsqlCommand(
+                await using var bump = new SqlCommand(
                     @"UPDATE admin_users
                       SET failed_login_count = failed_login_count + 1,
                           locked_until = CASE WHEN failed_login_count + 1 >= @max
-                                              THEN now() + make_interval(mins => @lockMinutes)
+                                              THEN DATEADD(minute, @lockMinutes, SYSDATETIMEOFFSET())
                                               ELSE locked_until END,
-                          updated_at = now()
+                          updated_at = SYSDATETIMEOFFSET()
                       WHERE id = @id", conn, tx);
                 bump.Parameters.AddWithValue("id", adminId);
                 bump.Parameters.AddWithValue("max", settings.AdminMaxFailedLogins);
@@ -124,9 +140,9 @@ public static class AdminAuthEndpoints
             return Results.Problem(SignInFailedMessage, statusCode: StatusCodes.Status401Unauthorized);
         }
 
-        await using (var reset = new NpgsqlCommand(
+        await using (var reset = new SqlCommand(
             @"UPDATE admin_users
-              SET failed_login_count = 0, locked_until = NULL, last_login_at = now(), updated_at = now()
+              SET failed_login_count = 0, locked_until = NULL, last_login_at = SYSDATETIMEOFFSET(), updated_at = SYSDATETIMEOFFSET()
               WHERE id = @id", conn, tx))
         {
             reset.Parameters.AddWithValue("id", adminId);
@@ -151,7 +167,7 @@ public static class AdminAuthEndpoints
     private static async Task<IResult> Refresh(
         RefreshRequest request,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         AuthSettings settings,
         TokenService tokens,
         CancellationToken ct)
@@ -162,22 +178,27 @@ public static class AdminAuthEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         long sessionId;
         long adminId;
         Guid familyId;
         bool expired;
         bool alreadyUsed;
-        DateTime? lastMfaAt;
-        await using (var find = new NpgsqlCommand(
-            @"SELECT id, admin_user_id, family_id, expires_at <= now(), (rotated_at IS NOT NULL OR revoked_at IS NOT NULL),
+        DateTimeOffset? lastMfaAt;
+        await using (var find = new SqlCommand(
+            /* The row is locked as it is read, so two requests for the same one queue rather than
+               both acting on what they saw. PostgreSQL wrote that as FOR UPDATE after the query;
+               SQL Server puts it on the table as a hint. HOLDLOCK keeps it to the end of the
+               transaction, which is what FOR UPDATE did. */
+            @"SELECT id, admin_user_id, family_id,
+                     CAST(CASE WHEN expires_at <= SYSDATETIMEOFFSET() THEN 1 ELSE 0 END AS bit),
+                     CAST(CASE WHEN rotated_at IS NOT NULL OR revoked_at IS NOT NULL THEN 1 ELSE 0 END AS bit),
                      last_mfa_at
-              FROM admin_sessions
-              WHERE refresh_token_hash = @hash
-              FOR UPDATE", conn, tx))
+              FROM admin_sessions WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
+              WHERE refresh_token_hash = @hash", conn, tx))
         {
-            find.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = TokenService.HashRefreshToken(request.RefreshToken) });
+            find.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = TokenService.HashRefreshToken(request.RefreshToken) });
             await using var reader = await find.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct))
             {
@@ -188,7 +209,7 @@ public static class AdminAuthEndpoints
             familyId = reader.GetGuid(2);
             expired = reader.GetBoolean(3);
             alreadyUsed = reader.GetBoolean(4);
-            lastMfaAt = reader.IsDBNull(5) ? null : reader.GetDateTime(5);
+            lastMfaAt = reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTimeOffset>(5);
         }
 
         // Every session is created by the MFA step, so last_mfa_at is always set. Checking it anyway
@@ -201,8 +222,8 @@ public static class AdminAuthEndpoints
         if (alreadyUsed)
         {
             // A rotated or revoked token presented again means it was copied: end every session in the family.
-            await using (var revoke = new NpgsqlCommand(
-                "UPDATE admin_sessions SET revoked_at = now(), revoked_reason = 'reuse_detected' WHERE family_id = @family AND revoked_at IS NULL", conn, tx))
+            await using (var revoke = new SqlCommand(
+                "UPDATE admin_sessions SET revoked_at = SYSDATETIMEOFFSET(), revoked_reason = 'reuse_detected' WHERE family_id = @family AND revoked_at IS NULL", conn, tx))
             {
                 revoke.Parameters.AddWithValue("family", familyId);
                 await revoke.ExecuteNonQueryAsync(ct);
@@ -217,7 +238,7 @@ public static class AdminAuthEndpoints
             return Results.Unauthorized();
         }
 
-        await using (var status = new NpgsqlCommand("SELECT status FROM admin_users WHERE id = @id", conn, tx))
+        await using (var status = new SqlCommand("SELECT status FROM admin_users WHERE id = @id", conn, tx))
         {
             status.Parameters.AddWithValue("id", adminId);
             if ((string?)await status.ExecuteScalarAsync(ct) != "active")
@@ -226,16 +247,16 @@ public static class AdminAuthEndpoints
             }
         }
 
-        await using (var rotate = new NpgsqlCommand("UPDATE admin_sessions SET rotated_at = now() WHERE id = @id", conn, tx))
+        await using (var rotate = new SqlCommand("UPDATE admin_sessions SET rotated_at = SYSDATETIMEOFFSET() WHERE id = @id", conn, tx))
         {
             rotate.Parameters.AddWithValue("id", sessionId);
             await rotate.ExecuteNonQueryAsync(ct);
         }
 
         var newRefreshToken = TokenService.NewRefreshToken();
-        await using (var insert = new NpgsqlCommand(
+        await using (var insert = new SqlCommand(
             @"INSERT INTO admin_sessions (admin_user_id, family_id, refresh_token_hash, expires_at, last_mfa_at, ip, user_agent)
-              VALUES (@admin, @family, @hash, now() + make_interval(days => @days), @lastMfa, @ip, @ua)", conn, tx))
+              VALUES (@admin, @family, @hash, DATEADD(day, @days, SYSDATETIMEOFFSET()), @lastMfa, @ip, @ua)", conn, tx))
         {
             AddSessionParameters(insert, adminId, newRefreshToken, settings, http);
             insert.Parameters.AddWithValue("family", familyId);
@@ -248,19 +269,23 @@ public static class AdminAuthEndpoints
         await tx.CommitAsync(ct);
 
         var (accessToken, expiresIn) = tokens.CreateAdminAccessToken(adminId);
-        return Results.Ok(new SessionDto(accessToken, newRefreshToken, expiresIn));
+        // Minted again on every refresh, and only while the account still holds the permission.
+        var superToken = await AdminAccess.HoldsSuperAdmin(conn, tx, adminId, ct)
+            ? tokens.CreateSuperAdminAccessToken(adminId).Token
+            : null;
+        return Results.Ok(new SessionDto(accessToken, newRefreshToken, expiresIn, superToken));
     }
 
     // ------------------------------------------------------------------ sign out
-    private static async Task<IResult> Logout(RefreshRequest request, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> Logout(RefreshRequest request, SqlDatabase db, CancellationToken ct)
     {
         if (!string.IsNullOrWhiteSpace(request.RefreshToken) && request.RefreshToken.Length <= 200)
         {
             await using var command = db.CreateCommand(
-                @"UPDATE admin_sessions SET revoked_at = now(), revoked_reason = 'logout'
+                @"UPDATE admin_sessions SET revoked_at = SYSDATETIMEOFFSET(), revoked_reason = 'logout'
                   WHERE revoked_at IS NULL
                     AND family_id = (SELECT family_id FROM admin_sessions WHERE refresh_token_hash = @hash)");
-            command.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = TokenService.HashRefreshToken(request.RefreshToken) });
+            command.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = TokenService.HashRefreshToken(request.RefreshToken) });
             await command.ExecuteNonQueryAsync(ct);
         }
 
@@ -287,7 +312,7 @@ public static class AdminAuthEndpoints
     }
 
     /// <summary>Shared with <see cref="AdminMfaEndpoints"/>, which is where sessions are created now.</summary>
-    internal static void AddSessionParameters(NpgsqlCommand command, long adminId, string refreshToken, AuthSettings settings, HttpContext http)
+    internal static void AddSessionParameters(SqlCommand command, long adminId, string refreshToken, AuthSettings settings, HttpContext http)
     {
         var userAgent = http.Request.Headers.UserAgent.ToString();
         if (userAgent.Length > 300)
@@ -297,10 +322,10 @@ public static class AdminAuthEndpoints
 
         IPAddress? ip = http.Connection.RemoteIpAddress;
         command.Parameters.AddWithValue("admin", adminId);
-        command.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = TokenService.HashRefreshToken(refreshToken) });
+        command.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = TokenService.HashRefreshToken(refreshToken) });
         command.Parameters.AddWithValue("days", settings.AdminRefreshTokenDays);
-        command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter("ua", NpgsqlDbType.Text) { Value = string.IsNullOrEmpty(userAgent) ? DBNull.Value : userAgent });
+        command.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("ua", SqlDbType.NVarChar) { Value = string.IsNullOrEmpty(userAgent) ? DBNull.Value : userAgent });
     }
 
     /// <summary>
@@ -308,8 +333,8 @@ public static class AdminAuthEndpoints
     /// admin to attribute it to, so it is recorded as a system event. Passwords are never part of details.
     /// </summary>
     internal static async Task WriteAudit(
-        NpgsqlConnection conn,
-        NpgsqlTransaction tx,
+        SqlConnection conn,
+        SqlTransaction tx,
         long? actorAdminId,
         string action,
         HttpContext http,
@@ -317,21 +342,21 @@ public static class AdminAuthEndpoints
         CancellationToken ct)
     {
         IPAddress? ip = http.Connection.RemoteIpAddress;
-        await using var command = new NpgsqlCommand(
+        await using var command = new SqlCommand(
             @"INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, details, ip)
               VALUES (@actorType, @actor, @action, 'admin_user', @entity, @details, @ip)", conn, tx);
         command.Parameters.AddWithValue("actorType", actorAdminId is null ? "system" : "admin");
-        command.Parameters.Add(new NpgsqlParameter("actor", NpgsqlDbType.Bigint) { Value = (object?)actorAdminId ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("actor", SqlDbType.BigInt) { Value = (object?)actorAdminId ?? DBNull.Value });
         command.Parameters.AddWithValue("action", action);
-        command.Parameters.Add(new NpgsqlParameter("entity", NpgsqlDbType.Text)
+        command.Parameters.Add(new SqlParameter("entity", SqlDbType.NVarChar)
         {
             Value = actorAdminId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? (object)DBNull.Value,
         });
-        command.Parameters.Add(new NpgsqlParameter("details", NpgsqlDbType.Jsonb)
+        command.Parameters.Add(new SqlParameter("details", SqlDbType.NVarChar)
         {
             Value = details is null ? DBNull.Value : JsonSerializer.Serialize(details),
         });
-        command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }

@@ -1,6 +1,7 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using BusinessDirectory.Api.Endpoints;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Auth;
 
@@ -50,38 +51,63 @@ public static class AdminBootstrap
 
         var passwordHash = AdminPasswords.Hash(password!);
 
-        using var dataSource = NpgsqlDataSource.Create(connectionString);
-        using var conn = dataSource.OpenConnection();
+        using var conn = new SqlConnection(connectionString);
+        conn.Open();
         using var tx = conn.BeginTransaction();
 
         long adminId;
         bool created;
-        using (var upsert = new NpgsqlCommand(
-            @"INSERT INTO admin_users (email, display_name, password_hash, status, password_changed_at)
-              VALUES (@email, @name, @hash, 'active', now())
-              ON CONFLICT (email) DO UPDATE
-                SET display_name = @name,
-                    password_hash = @hash,
-                    status = 'active',
-                    password_changed_at = now(),
-                    failed_login_count = 0,
-                    locked_until = NULL,
-                    updated_at = now()
-              RETURNING id, (xmax = 0)", conn, tx))
+        using (var upsert = new SqlCommand(
+            /* PostgreSQL's ON CONFLICT ... DO UPDATE, as SQL Server writes it. MERGE would be the
+               direct translation, but MERGE has a history of edge-case bugs and this runs on exactly
+               one row, so an UPDATE followed by an INSERT when nothing was updated is plainer and
+               safer. Both run inside the caller's transaction. */
+            @"UPDATE admin_users
+              SET display_name = @name,
+                  password_hash = @hash,
+                  status = 'active',
+                  password_changed_at = SYSDATETIMEOFFSET(),
+                  failed_login_count = 0,
+                  locked_until = NULL,
+                  updated_at = SYSDATETIMEOFFSET()
+              OUTPUT inserted.id, CAST(0 AS bit) AS created
+              WHERE email = @email;
+
+              INSERT INTO admin_users (email, display_name, password_hash, status, password_changed_at)
+              OUTPUT inserted.id, CAST(1 AS bit) AS created
+              SELECT @email, @name, @hash, 'active', SYSDATETIMEOFFSET()
+              WHERE NOT EXISTS (SELECT 1 FROM admin_users WHERE email = @email)", conn, tx))
         {
             upsert.Parameters.AddWithValue("email", email);
             upsert.Parameters.AddWithValue("name", displayName);
             upsert.Parameters.AddWithValue("hash", passwordHash);
             using var reader = upsert.ExecuteReader();
-            reader.Read();
+
+            /* Two statements, so two result sets: the UPDATE's is empty when the account is new, and
+               the INSERT's is empty when it already existed. Walk to whichever has the row. */
+            while (!reader.Read())
+            {
+                if (!reader.NextResult())
+                {
+                    throw new InvalidOperationException("The admin upsert produced no row.");
+                }
+            }
+
             adminId = reader.GetInt64(0);
-            created = reader.GetBoolean(1);   // xmax = 0 means this row was inserted, not updated
+            /* The second column says which statement produced the row: the UPDATE outputs 0, the
+               INSERT outputs 1. PostgreSQL answered the same question with (xmax = 0). */
+            created = reader.GetBoolean(1);
         }
 
-        using (var assign = new NpgsqlCommand(
+        using (var assign = new SqlCommand(
+            /* ON CONFLICT DO NOTHING becomes "only insert what is not there": the WHERE NOT EXISTS
+               does the same job and needs no MERGE. */
             @"INSERT INTO admin_user_roles (admin_user_id, role_id)
-              SELECT @admin, r.id FROM roles r WHERE r.slug = @role
-              ON CONFLICT DO NOTHING", conn, tx))
+              SELECT @admin, r.id
+              FROM roles r
+              WHERE r.slug = @role
+                AND NOT EXISTS (SELECT 1 FROM admin_user_roles aur
+                                WHERE aur.admin_user_id = @admin AND aur.role_id = r.id)", conn, tx))
         {
             assign.Parameters.AddWithValue("admin", adminId);
             assign.Parameters.AddWithValue("role", role);
@@ -93,13 +119,13 @@ public static class AdminBootstrap
             }
         }
 
-        using (var audit = new NpgsqlCommand(
+        using (var audit = new SqlCommand(
             @"INSERT INTO audit_logs (actor_type, action, entity_type, entity_id, details)
               VALUES ('system', @action, 'admin_user', @entity, @details)", conn, tx))
         {
             audit.Parameters.AddWithValue("action", created ? "admin.bootstrapped" : "admin.password_reset_by_cli");
             audit.Parameters.AddWithValue("entity", adminId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            audit.Parameters.Add(new NpgsqlParameter("details", NpgsqlDbType.Jsonb)
+            audit.Parameters.Add(new SqlParameter("details", SqlDbType.NVarChar)
             {
                 Value = System.Text.Json.JsonSerializer.Serialize(new { email, role }),
             });

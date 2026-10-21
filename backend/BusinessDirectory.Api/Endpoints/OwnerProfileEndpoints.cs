@@ -1,8 +1,9 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using System.Security.Claims;
 using BusinessDirectory.Api.Auth;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -32,7 +33,7 @@ public static class OwnerProfileEndpoints
         ProfileRequest request,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -47,13 +48,15 @@ public static class OwnerProfileEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         string phone;
-        await using (var update = new NpgsqlCommand(
-            @"UPDATE users SET name = @name, email = @email, updated_at = now()
-              WHERE id = @id AND status = 'active'
-              RETURNING phone_e164", conn, tx))
+        await using (var update = new SqlCommand(
+            /* OUTPUT is SQL Server's RETURNING, and it goes before the WHERE rather than after it.
+               "inserted" is the row as it now stands, which is what the old RETURNING gave back. */
+            @"UPDATE users SET name = @name, email = @email, updated_at = SYSDATETIMEOFFSET()
+              OUTPUT inserted.phone_e164
+              WHERE id = @id AND status = 'active'", conn, tx))
         {
             update.Parameters.AddWithValue("name", valid.Name);
             update.Parameters.AddWithValue("email", valid.Email);
@@ -68,14 +71,14 @@ public static class OwnerProfileEndpoints
 
         // What changed is not recorded, only that it did: the name and email are personal data and
         // the audit log is read by administrators.
-        await using (var audit = new NpgsqlCommand(
+        await using (var audit = new SqlCommand(
             @"INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, ip)
               VALUES ('owner', @user, 'owner.profile_updated', 'user', @entity, @ip)", conn, tx))
         {
             IPAddress? ip = http.Connection.RemoteIpAddress;
             audit.Parameters.AddWithValue("user", userId);
             audit.Parameters.AddWithValue("entity", userId.ToString());
-            audit.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+            audit.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
             await audit.ExecuteNonQueryAsync(ct);
         }
 

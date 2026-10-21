@@ -20,6 +20,9 @@ public sealed class TokenService(AuthSettings settings)
 
     public TokenValidationParameters AdminValidationParameters => ParametersFor(AuthSettings.AdminAudience);
 
+    /// <summary>Accepts only the super-admin audience, so an admin token cannot satisfy it.</summary>
+    public TokenValidationParameters SuperAdminValidationParameters => ParametersFor(AuthSettings.SuperAdminAudience);
+
     /// <summary>Validates the half-finished sign-in: password accepted, TOTP still to come.</summary>
     public TokenValidationParameters AdminMfaValidationParameters => ParametersFor(AuthSettings.AdminMfaAudience);
 
@@ -31,6 +34,14 @@ public sealed class TokenService(AuthSettings settings)
 
     public (string Token, int ExpiresInSeconds) CreateAdminAccessToken(long adminUserId) =>
         Create(adminUserId, AuthSettings.AdminAudience, settings.AdminAccessTokenMinutes);
+
+    /// <summary>
+    /// Issued alongside the admin token, and only to an account that holds <c>admins.manage</c>.
+    /// It expires on the same short clock, and the permission is re-read from the database on every
+    /// request, so losing the role takes effect at once rather than when the token runs out.
+    /// </summary>
+    public (string Token, int ExpiresInSeconds) CreateSuperAdminAccessToken(long adminUserId) =>
+        Create(adminUserId, AuthSettings.SuperAdminAudience, settings.AdminAccessTokenMinutes);
 
     /// <summary>
     /// The tokens for the two halfway states. Both are short-lived and neither satisfies the admin

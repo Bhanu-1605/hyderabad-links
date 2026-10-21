@@ -1,9 +1,10 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using System.Security.Claims;
 using BusinessDirectory.Api.Auth;
 using BusinessDirectory.Api.Listings;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -37,7 +38,7 @@ public static class OwnerOnboardingEndpoints
         OnboardingRequest request,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -46,7 +47,7 @@ public static class OwnerOnboardingEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         // Locking the user row makes a double submit wait rather than race. The second one then sees
         // the name already set and takes the "already onboarded" path below instead of creating a
@@ -54,8 +55,13 @@ public static class OwnerOnboardingEndpoints
         string phone;
         string? existingName;
         string? existingEmail;
-        await using (var find = new NpgsqlCommand(
-            "SELECT phone_e164, name, email FROM users WHERE id = @id AND status = 'active' FOR UPDATE", conn, tx))
+        await using (var find = new SqlCommand(
+            /* UPDLOCK + ROWLOCK is SQL Server's FOR UPDATE: it takes the update lock on the row
+               as it is read, so two registrations for the same person queue instead of racing.
+               HOLDLOCK keeps it to the end of the transaction, which FOR UPDATE also did. */
+            @"SELECT phone_e164, name, email
+              FROM users WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
+              WHERE id = @id AND status = 'active'", conn, tx))
         {
             find.Parameters.AddWithValue("id", userId);
             await using var reader = await find.ExecuteReaderAsync(ct);
@@ -128,7 +134,7 @@ public static class OwnerOnboardingEndpoints
             var slug = await ListingWriter.ChooseSlug(conn, tx, locality.Id, validListing.Name, ct);
             var businessId = await ListingWriter.InsertBusiness(conn, tx, validListing.Name, ct);
 
-            await using (var member = new NpgsqlCommand(
+            await using (var member = new SqlCommand(
                 "INSERT INTO business_members (business_id, user_id, role) VALUES (@business, @user, 'owner')", conn, tx))
             {
                 member.Parameters.AddWithValue("business", businessId);
@@ -143,15 +149,15 @@ public static class OwnerOnboardingEndpoints
 
             await ListingWriter.AddPrimaryCategory(conn, tx, listingId, categoryId.Value, ct);
         }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        catch (SqlException ex) when (SqlErrors.IsUniqueViolation(ex))
         {
             return Results.Problem("That name was just taken in this area. Please try a different one.", statusCode: StatusCodes.Status409Conflict);
         }
 
         // `name IS NULL` repeats the check made under the row lock, so this can never overwrite a
         // profile that was filled in by some other path.
-        await using (var update = new NpgsqlCommand(
-            "UPDATE users SET name = @name, email = @email, updated_at = now() WHERE id = @id AND name IS NULL", conn, tx))
+        await using (var update = new SqlCommand(
+            "UPDATE users SET name = @name, email = @email, updated_at = SYSDATETIMEOFFSET() WHERE id = @id AND name IS NULL", conn, tx))
         {
             update.Parameters.AddWithValue("name", validProfile.Name);
             update.Parameters.AddWithValue("email", validProfile.Email);
@@ -169,29 +175,28 @@ public static class OwnerOnboardingEndpoints
             new OnboardingResultDto(validProfile.Name, validProfile.Email, listingId, Created: true));
     }
 
-    private static async Task<long?> FindFirstListingId(NpgsqlConnection conn, NpgsqlTransaction tx, long userId, CancellationToken ct)
+    private static async Task<long?> FindFirstListingId(SqlConnection conn, SqlTransaction tx, long userId, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
-            @"SELECT li.id
+        await using var command = new SqlCommand(
+            @"SELECT TOP (1) li.id
               FROM listings li
               JOIN business_members bm ON bm.business_id = li.business_id AND bm.user_id = @user
               WHERE li.status <> 'archived'
-              ORDER BY li.created_at, li.id
-              LIMIT 1", conn, tx);
+              ORDER BY li.created_at, li.id", conn, tx);
         command.Parameters.AddWithValue("user", userId);
         return (long?)await command.ExecuteScalarAsync(ct);
     }
 
     private static async Task WriteAudit(
-        NpgsqlConnection conn, NpgsqlTransaction tx, long userId, long listingId, HttpContext http, CancellationToken ct)
+        SqlConnection conn, SqlTransaction tx, long userId, long listingId, HttpContext http, CancellationToken ct)
     {
         IPAddress? ip = http.Connection.RemoteIpAddress;
-        await using var command = new NpgsqlCommand(
+        await using var command = new SqlCommand(
             @"INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, ip)
               VALUES ('owner', @user, 'owner.onboarded', 'listing', @entity, @ip)", conn, tx);
         command.Parameters.AddWithValue("user", userId);
         command.Parameters.AddWithValue("entity", listingId.ToString());
-        command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }

@@ -1,39 +1,94 @@
-# Database design (Phase 1 in progress)
+# Database Design — HYDERABAD LINKS
 
-Implemented so far: `V0001` (extensions, cities, localities, categories, slug_history) `V0002` (users, businesses, business_members, listings, listing_categories, listing_service_areas) and `V0003` (otp_challenges, user_sessions, admin_users, admin_recovery_codes, admin_sessions, roles, permissions, role_permissions, admin_user_roles, audit_logs). The rest of the groups below follow in V0004+.
-`audit_logs` is append-only via rules that turn UPDATE/DELETE into no-ops. Admin roles and permissions are seeded by `R003_roles_permissions.sql`.
-Listings attach to sub-categories only (composite foreign key). At most one primary category per listing is enforced by a partial unique index; "at least one" is enforced by the application before review.
-Businesses with no `business_members` rows are unclaimed (pre-loaded listings waiting to be claimed).
-The two-level category rule is enforced by a composite foreign key plus a CHECK constraint (no trigger).
+## 1. Database Platform
 
-PostgreSQL + PostGIS. Raw SQL migrations in `database/migrations`. Integer minor units for money. Slugs are never primary keys.
-Extensions needed: `postgis`, `pg_trgm`, `unaccent` (must be allow-listed on Azure Flexible Server).
+- **Local development:** Microsoft SQL Server in Docker.
+- **Production:** Azure SQL Database.
+- **Database driver:** `Microsoft.Data.SqlClient`.
+- **Data access:** Raw parameterized SQL. No ORM.
+- **Migration tool:** DbUp.
+- **Current migrations:** `database/sqlserver/migrations/`.
+- **Historical migrations:** `database/migrations/` contains the former PostgreSQL implementation and must not be executed against SQL Server.
 
-## Key modelling rules
-- `businesses` = the brand/entity. `listings` = one public presence at one location (own locality, map point, URL, media, plan,
-  verification). `listing_service_areas` = extra localities served, with no extra URL.
-- `categories` = two-level tree; slugs globally unique; `listing_categories` with exactly one primary per listing.
-- Listing slug unique per locality; the URL's category segment must match the primary category, otherwise 301 to the canonical URL.
-  `slug_history` keeps old slugs for redirects.
-- Effective plan = active paid subscription, else FREE. At most one active subscription per listing (partial unique index).
-- Entitlements live in `plan_entitlements`, separate from subscription history. Prices in `plan_prices` (not hardcoded).
-- `media_assets.status`: pending_upload → active; hidden_over_limit; rejected; deleted. Counting happens in a transaction that
-  locks the listing row, so concurrent uploads cannot exceed limits.
-- `audit_logs` and `verification_events` are append-only; the application database role has no UPDATE/DELETE on them.
-- `listing_events` partitioned by month; `listing_daily_stats` holds de-duplicated rollups (anti-manipulation).
+## 2. Design Principles
 
-## Table groups
-Geography: cities, localities · Taxonomy: categories, slug_history · Business: businesses, business_members, listings,
-listing_categories, listing_service_areas · Accounts: users, user_sessions, otp_challenges, admin_users, roles, permissions,
-role_permissions, admin_user_roles · Plans: plans, plan_entitlements, plan_prices · Billing: subscriptions, payments, refunds,
-payment_webhook_events · Media: media_assets · Trust: verification_records, verification_events, reviews, abuse_reports ·
-Engagement: enquiries, listing_events, listing_daily_stats · Services: campaigns, sponsored_placements · Governance: audit_logs.
+1. Use parameterized SQL for all database queries to prevent SQL injection.
+2. Keep database access inside the API; frontend applications must not connect directly to the database.
+3. Keep modules responsible for their own data access and business rules.
+4. Use foreign keys, unique constraints, check constraints, and indexes where appropriate.
+5. Use transactions when multiple database operations must succeed or fail together.
+6. Store timestamps consistently in UTC.
+7. Use forward-only SQL Server migrations for schema changes.
+8. Never run migrations or destructive database commands against production without an explicit, reviewed deployment process.
 
-## Search
-Weighted `tsvector` (name > category/services > description), `pg_trgm` GIN index on name, GiST on location, composite index on
-(locality, status).
+## 3. Core Data Areas
 
-## Migrations
-`V0001__description.sql`, applied in order by DbUp (Phase 1), recorded in a history table. Production is forward-only; each
-reversible migration gets a matching script in `database/rollback/`. Risky releases take a point-in-time-restore marker first.
-Use expand/contract (add first, remove in a later release). CI rejects destructive statements without an explicit approval comment.
+The database supports these functional areas:
+
+- **Identity and authentication:** Users, phone-based authentication, OTP verification, sessions, and administrative access.
+- **Business listings:** Businesses, owners, categories, listing status, verification, and subscription plans.
+- **Locations:** Hyderabad locations, localities, and location-based listing discovery.
+- **Search:** Searchable business names, descriptions, categories, locations, and related search terms.
+- **Media:** Business images and videos, with file metadata stored in the database and binary content stored in Azure Blob Storage.
+- **Enquiries and leads:** Customer enquiries, business lead management, and related status tracking.
+- **Reviews:** Customer reviews, moderation, and publication status.
+- **Notifications:** Notification records and delivery status.
+- **Billing:** Listing plans, subscriptions, payment records, and payment-provider references.
+- **Administration:** Admin actions, moderation, audit records, and super-admin controls.
+
+The authoritative table definitions and relationships are maintained in the current SQL Server migration files.
+
+## 4. Search Design
+
+Search must use capabilities supported by Microsoft SQL Server and Azure SQL Database.
+
+- Use SQL Server full-text search where configured and supported.
+- Use indexed, normalized columns for common filters and exact matches.
+- Use a dedicated category-search-terms table where required by the current implementation.
+- Use parameterized queries for search terms, filters, sorting, and pagination.
+- Apply location, category, listing-status, and visibility filters before returning results.
+- Review execution plans and indexes for frequently used search queries.
+
+Do not assume PostgreSQL-specific extensions or operators are available in SQL Server.
+
+## 5. Location Design
+
+Store structured location information using the schema defined by the current SQL Server migrations.
+
+Location filtering must use supported SQL Server types and queries. Any geographic-distance or proximity functionality must be implemented using SQL Server-compatible spatial capabilities if required by the application.
+
+Do not assume PostGIS functions or types are available.
+
+## 6. Media Storage
+
+- Store image and video files in Azure Blob Storage.
+- Store file metadata, ownership, listing relationships, content types, sizes, and storage references in SQL Server.
+- Enforce media limits according to the listing plan.
+- Validate uploads and authorize access on the server.
+- Do not store large media binaries directly in relational database tables unless an explicit requirement justifies it.
+
+## 7. Security and Data Integrity
+
+- Use parameterized SQL for all values supplied to database queries.
+- Enforce authorization in the API, not only in the frontend.
+- Use database constraints to protect referential integrity.
+- Keep credentials and connection strings in environment-specific secret storage.
+- Do not log passwords, OTPs, authentication tokens, or sensitive connection details.
+- Use least-privilege database identities.
+- Separate development, staging, and production database configurations.
+- Apply schema changes through reviewed migrations.
+
+## 8. Migration Rules
+
+1. Add new SQL Server migrations under `database/sqlserver/migrations/`.
+2. Follow the existing migration naming convention.
+3. Keep migrations forward-only; do not silently rewrite migrations already applied to a database.
+4. Review each migration for data loss, locking, index impact, and compatibility.
+5. Test migrations against a local SQL Server instance before deployment.
+6. Keep PostgreSQL migrations under `database/migrations/` as historical records unless a separately approved archival change is made.
+7. Never execute the historical PostgreSQL migrations against SQL Server.
+8. Do not run destructive migrations against production without explicit approval and a verified recovery plan.
+
+## 9. Source of Truth
+
+The current SQL Server migration files define the authoritative database schema. If this document differs from the implemented schema, inspect the migrations and update this document to reflect the actual implementation rather than inventing tables or columns.

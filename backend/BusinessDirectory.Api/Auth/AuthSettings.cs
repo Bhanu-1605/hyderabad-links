@@ -19,6 +19,13 @@ public sealed class AuthSettings
     public const string AdminAudience = "admin";
 
     /// <summary>
+    /// Platform administration (/api/v1/super-admin). A separate audience from
+    /// <see cref="AdminAudience"/>, so an ordinary administrator's token is refused by the
+    /// super-admin scheme outright rather than relying on a permission check inside a handler.
+    /// </summary>
+    public const string SuperAdminAudience = "super-admin";
+
+    /// <summary>
     /// The audience a token carries between the password step and the TOTP step. It is deliberately
     /// *not* <see cref="AdminAudience"/>: the admin scheme validates the audience, so a half-finished
     /// sign-in fails validation on every admin route rather than depending on a check somewhere in

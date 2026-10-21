@@ -7,10 +7,12 @@ import { formatDistance, telHref, whatsappHref } from "@/lib/format";
  * One business in a list of results. Shared by `/search` and the locality + category pages, so
  * both show a business the same way.
  *
- * It shows only what the API actually returns. There is no rating, no opening hours and no logo
- * here because none of those exist in the database yet - the monogram stands in for the logo.
+ * It shows only what the API actually returns: there is still no rating and no opening hours here,
+ * because neither exists in the database. The logo is real when the business has uploaded one, and
+ * its first photo stands in when it has not; a monogram is the last resort.
  */
 export function ListingCard({ listing }: { listing: SearchListing }) {
+  const image = listing.logoUrl ?? listing.photoUrl;
   // Addresses usually already end with the area, so the area is only appended when it is missing.
   const address = listing.addressLine?.trim();
   const where =
@@ -21,12 +23,23 @@ export function ListingCard({ listing }: { listing: SearchListing }) {
   return (
     <li className="flex flex-col rounded-xl border border-line bg-white p-5 shadow-[0_8px_22px_#002a340b] transition hover:-translate-y-0.5 hover:shadow-[0_14px_30px_#002a3417]">
       <div className="flex items-start justify-between gap-3">
-        <span
-          aria-hidden="true"
-          className="grid h-14 w-14 shrink-0 place-items-center rounded-full border border-brand-200 bg-brand-50 text-lg font-black text-brand-700"
-        >
-          {initialsOf(listing.name)}
-        </span>
+        {image ? (
+          // Decorative: the business name is right below it, so repeating it here only makes a
+          // screen reader say the same thing twice.
+          <img
+            src={image}
+            alt=""
+            loading="lazy"
+            className="h-14 w-14 shrink-0 rounded-full border border-brand-200 bg-white object-cover"
+          />
+        ) : (
+          <span
+            aria-hidden="true"
+            className="grid h-14 w-14 shrink-0 place-items-center rounded-full border border-brand-200 bg-brand-50 text-lg font-black text-brand-700"
+          >
+            {initialsOf(listing.name)}
+          </span>
+        )}
         {/* Only shown when the search knew where the visitor was. */}
         {listing.distanceMetres !== null ? (
           <span className="shrink-0 rounded-full bg-brand-50 px-3 py-1 text-xs font-extrabold text-brand-800">

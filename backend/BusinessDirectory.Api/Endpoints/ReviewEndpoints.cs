@@ -1,9 +1,10 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using System.Security.Claims;
 using BusinessDirectory.Api.Auth;
 using BusinessDirectory.Api.Listings;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -21,7 +22,7 @@ public static class ReviewEndpoints
 
     /// <param name="AuthorName">The reviewer's first name only. Reviews are not anonymous, but a
     /// full name and phone number are not the public's business either.</param>
-    public sealed record PublicReviewDto(long Id, short Rating, string Body, string AuthorName, DateTime CreatedAt);
+    public sealed record PublicReviewDto(long Id, short Rating, string Body, string AuthorName, DateTimeOffset CreatedAt);
 
     /// <param name="Average">Null when nothing has been approved yet, rather than 0, which would
     /// read as "rated zero".</param>
@@ -37,7 +38,7 @@ public static class ReviewEndpoints
         string Body,
         string Status,
         string? ModerationNote,
-        DateTime CreatedAt);
+        DateTimeOffset CreatedAt);
 
     public sealed record ModerationReviewDto(
         long Id,
@@ -46,7 +47,7 @@ public static class ReviewEndpoints
         short Rating,
         string Body,
         string ReviewerPhone,
-        DateTime CreatedAt);
+        DateTimeOffset CreatedAt);
 
     public sealed record ModerationPage(IReadOnlyList<ModerationReviewDto> Items, int Page, int PageSize, int Total, int TotalPages);
 
@@ -81,7 +82,7 @@ public static class ReviewEndpoints
         string citySlug,
         string localitySlug,
         string slug,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         // Only approved reviews, and only for a live listing. The average is computed over the same
@@ -101,11 +102,13 @@ public static class ReviewEndpoints
                   JOIN users u ON u.id = r.user_id
                   WHERE r.status = 'approved'
               )
-              SELECT (SELECT count(*) FROM approved),
-                     (SELECT avg(rating)::double precision FROM approved),
+              SELECT (SELECT COUNT_BIG(*) FROM approved),
+                     /* The cast has to be inside the average, not outside it: AVG over a smallint
+                        column does integer arithmetic in SQL Server, so 4 and 5 would average to 4. */
+                     (SELECT AVG(CAST(rating AS float)) FROM approved),
                      a.id, a.rating, a.body, a.author_name, a.created_at
-              FROM (SELECT 1) AS always_one_row
-              LEFT JOIN (SELECT * FROM approved ORDER BY created_at DESC LIMIT @limit) a ON true
+              FROM (SELECT 1 AS one) AS always_one_row
+              LEFT JOIN (SELECT TOP (@limit) * FROM approved ORDER BY created_at DESC) a ON 1 = 1
               ORDER BY a.created_at DESC");
         command.Parameters.AddWithValue("city", citySlug);
         command.Parameters.AddWithValue("locality", localitySlug);
@@ -130,7 +133,7 @@ public static class ReviewEndpoints
                 reader.GetInt16(3),
                 reader.GetString(4),
                 FirstNameOf(reader.IsDBNull(5) ? null : reader.GetString(5)),
-                reader.GetDateTime(6)));
+                reader.GetFieldValue<DateTimeOffset>(6)));
         }
 
         return Results.Ok(new ReviewSummaryDto(average, count, items));
@@ -156,7 +159,7 @@ public static class ReviewEndpoints
         string slug,
         SubmitReviewRequest request,
         ClaimsPrincipal principal,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
@@ -171,12 +174,14 @@ public static class ReviewEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         // D11: the reviewer must have verified a phone number. Every user reaches the site through
         // the OTP flow, so this is belt and braces against a future path that does not.
-        await using (var verified = new NpgsqlCommand(
-            "SELECT phone_verified_at IS NOT NULL FROM users WHERE id = @id AND status = 'active'", conn, tx))
+        await using (var verified = new SqlCommand(
+            // A yes/no answer is a bit in SQL Server, not a bare condition.
+            @"SELECT CAST(CASE WHEN phone_verified_at IS NOT NULL THEN 1 ELSE 0 END AS bit)
+              FROM users WHERE id = @id AND status = 'active'", conn, tx))
         {
             verified.Parameters.AddWithValue("id", userId);
             if (await verified.ExecuteScalarAsync(ct) is not true)
@@ -189,10 +194,12 @@ public static class ReviewEndpoints
 
         long listingId;
         bool ownsIt;
-        await using (var find = new NpgsqlCommand(
+        await using (var find = new SqlCommand(
             @"SELECT li.id,
-                     EXISTS (SELECT 1 FROM business_members bm
-                             WHERE bm.business_id = li.business_id AND bm.user_id = @user)
+                     -- EXISTS is a condition, so reading it as a column means wrapping it in a CASE.
+                     CAST(CASE WHEN EXISTS (SELECT 1 FROM business_members bm
+                                            WHERE bm.business_id = li.business_id AND bm.user_id = @user)
+                               THEN 1 ELSE 0 END AS bit)
               FROM listings li
               JOIN localities lo ON lo.id = li.locality_id
               JOIN cities ci ON ci.id = lo.city_id
@@ -221,10 +228,10 @@ public static class ReviewEndpoints
 
         try
         {
-            await using var insert = new NpgsqlCommand(
+            await using var insert = new SqlCommand(
                 @"INSERT INTO reviews (listing_id, user_id, rating, body)
-                  VALUES (@listing, @user, @rating, @body)
-                  RETURNING id", conn, tx);
+                  OUTPUT inserted.id
+                  VALUES (@listing, @user, @rating, @body)", conn, tx);
             insert.Parameters.AddWithValue("listing", listingId);
             insert.Parameters.AddWithValue("user", userId);
             insert.Parameters.AddWithValue("rating", review.Rating);
@@ -235,7 +242,7 @@ public static class ReviewEndpoints
             // 202, not 201: it exists, but nothing is public until a moderator approves it.
             return Results.Accepted($"/api/v1/me/reviews", new { id, status = "pending" });
         }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        catch (SqlException ex) when (SqlErrors.IsUniqueViolation(ex))
         {
             // The unique constraint, not an API check, is what makes one-per-person true.
             return Results.Problem(
@@ -245,7 +252,7 @@ public static class ReviewEndpoints
     }
 
     // ------------------------------------------------------------------ customer: see their own
-    private static async Task<IResult> ListMine(ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> ListMine(ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
     {
         if (!MeEndpoints.TryGetUserId(principal, out var userId))
         {
@@ -259,7 +266,7 @@ public static class ReviewEndpoints
               JOIN listings li ON li.id = r.listing_id
               JOIN localities lo ON lo.id = li.locality_id
               JOIN cities ci ON ci.id = lo.city_id
-              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary
+              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary = 1
               JOIN categories pc ON pc.id = lc.category_id
               WHERE r.user_id = @user
               ORDER BY r.created_at DESC");
@@ -278,7 +285,7 @@ public static class ReviewEndpoints
                 reader.GetString(8),
                 reader.GetString(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
-                reader.GetDateTime(11)));
+                reader.GetFieldValue<DateTimeOffset>(11)));
         }
 
         return Results.Ok(items);
@@ -289,7 +296,7 @@ public static class ReviewEndpoints
         string? status,
         int? page,
         ClaimsPrincipal principal,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         var admin = await AdminAccess.Load(db, principal, ct);
@@ -320,12 +327,12 @@ public static class ReviewEndpoints
                   WHERE r.status = @status
               ),
               page AS (
-                  SELECT * FROM matching ORDER BY created_at LIMIT @size OFFSET @offset
+                  SELECT * FROM matching ORDER BY created_at OFFSET @offset ROWS FETCH NEXT @size ROWS ONLY
               )
-              SELECT (SELECT count(*) FROM matching),
+              SELECT (SELECT COUNT_BIG(*) FROM matching),
                      p.id, p.listing_id, p.listing_name, p.rating, p.body, p.phone_e164, p.created_at
-              FROM (SELECT 1) AS always_one_row
-              LEFT JOIN page p ON true
+              FROM (SELECT 1 AS one) AS always_one_row
+              LEFT JOIN page p ON 1 = 1
               ORDER BY p.created_at");
         command.Parameters.AddWithValue("status", wanted);
         command.Parameters.AddWithValue("size", ModerationPageSize);
@@ -349,7 +356,7 @@ public static class ReviewEndpoints
                 reader.GetInt16(4),
                 reader.GetString(5),
                 reader.GetString(6),
-                reader.GetDateTime(7)));
+                reader.GetFieldValue<DateTimeOffset>(7)));
         }
 
         var totalPages = (int)Math.Ceiling(total / (double)ModerationPageSize);
@@ -361,7 +368,7 @@ public static class ReviewEndpoints
         DecisionRequest request,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct) =>
         Decide(id, "approved", request.Note, principal, http, db, ct);
 
@@ -370,7 +377,7 @@ public static class ReviewEndpoints
         DecisionRequest request,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct) =>
         Decide(id, "rejected", request.Note, principal, http, db, ct);
 
@@ -380,7 +387,7 @@ public static class ReviewEndpoints
         string? note,
         ClaimsPrincipal principal,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         var admin = await AdminAccess.Load(db, principal, ct);
@@ -407,18 +414,18 @@ public static class ReviewEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         // Only a pending review can be decided, so two moderators cannot both record a decision.
-        await using (var update = new NpgsqlCommand(
+        await using (var update = new SqlCommand(
             @"UPDATE reviews
-              SET status = @status, moderation_note = @note, moderated_at = now(),
-                  moderated_by_admin_id = @admin, updated_at = now()
-              WHERE id = @id AND status = 'pending'
-              RETURNING id", conn, tx))
+              SET status = @status, moderation_note = @note, moderated_at = SYSDATETIMEOFFSET(),
+                  moderated_by_admin_id = @admin, updated_at = SYSDATETIMEOFFSET()
+              OUTPUT inserted.id
+              WHERE id = @id AND status = 'pending'", conn, tx))
         {
             update.Parameters.AddWithValue("status", status);
-            update.Parameters.Add(new NpgsqlParameter("note", NpgsqlDbType.Text) { Value = (object?)trimmedNote ?? DBNull.Value });
+            update.Parameters.Add(new SqlParameter("note", SqlDbType.NVarChar) { Value = (object?)trimmedNote ?? DBNull.Value });
             update.Parameters.AddWithValue("admin", admin.Id);
             update.Parameters.AddWithValue("id", id);
             if (await update.ExecuteScalarAsync(ct) is null)
@@ -427,7 +434,7 @@ public static class ReviewEndpoints
             }
         }
 
-        await using (var audit = new NpgsqlCommand(
+        await using (var audit = new SqlCommand(
             @"INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, ip)
               VALUES ('admin', @admin, @action, 'review', @entity, @ip)", conn, tx))
         {
@@ -435,7 +442,7 @@ public static class ReviewEndpoints
             audit.Parameters.AddWithValue("admin", admin.Id);
             audit.Parameters.AddWithValue("action", status == "approved" ? "review.approved" : "review.rejected");
             audit.Parameters.AddWithValue("entity", id.ToString());
-            audit.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+            audit.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
             await audit.ExecuteNonQueryAsync(ct);
         }
 

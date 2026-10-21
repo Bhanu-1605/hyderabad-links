@@ -1,9 +1,9 @@
 namespace BusinessDirectory.Api.Listings;
 
 /// <summary>
-/// Validated, normalised parameters for GET /api/v1/public/localities/search.
-/// The rules live here rather than in the endpoint so they can be unit-tested without a database,
-/// the same way <see cref="ListingSearchQuery"/> works.
+/// Escapes characters that have special meaning in SQL LIKE patterns.
+/// The SQL Server query must use ESCAPE '\' so the backslash escapes
+/// literal percent, underscore, and backslash characters.
 /// </summary>
 public sealed record LocalitySearchQuery(string Text, string? CitySlug, int Limit)
 {
@@ -16,10 +16,10 @@ public sealed record LocalitySearchQuery(string Text, string? CitySlug, int Limi
     /// <summary>Longer text is cut rather than rejected: it is almost always a stray paste.</summary>
     public const int MaxTextLength = 60;
 
-    /// <summary>ILIKE pattern for "starts with what was typed" - the matches worth showing first.</summary>
+    /// <summary>LIKE pattern for "starts with what was typed" - the matches worth showing first.</summary>
     public string PrefixPattern => EscapeForLike(Text) + "%";
 
-    /// <summary>ILIKE pattern for "contains what was typed".</summary>
+    /// <summary>LIKE pattern for "contains what was typed".</summary>
     public string ContainsPattern => "%" + EscapeForLike(Text) + "%";
 
     public static LocalitySearchQuery? TryCreate(string? q, string? city, int? limit, out string? error)
@@ -42,10 +42,10 @@ public sealed record LocalitySearchQuery(string Text, string? CitySlug, int Limi
     }
 
     /// <summary>
-    /// Makes the typed text safe to drop inside an ILIKE pattern. Without this a visitor typing
-    /// "%" would match every locality and "_" would match any single character. The backslash
-    /// escape is the PostgreSQL default, so the SQL needs no ESCAPE clause.
-    /// </summary>
+/// Escapes characters that have special meaning in SQL LIKE patterns.
+/// The corresponding SQL Server query uses ESCAPE '\' so backslashes
+/// can escape literal percent, underscore, and backslash characters.
+/// </summary>
     private static string EscapeForLike(string value) =>
         value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 

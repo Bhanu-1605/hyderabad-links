@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // Migration safety check. Run locally with `npm run check:migrations` and in CI.
 //
+// It checks database/sqlserver/migrations, the live path. database/migrations holds the original
+// PostgreSQL migrations, kept as history (decision D41) and never run again, so there is nothing to
+// enforce about them any more.
+//
 // Rules enforced:
-//  1. Files are named V0001__short_description.sql (lowercase, underscores).
+//  1. Files are named S0001__short_description.sql, with an optional ".notx" before the extension
+//     for a migration that has to run outside a transaction (see MigrationRunner).
 //  2. Version numbers start at 1, have no gaps and no duplicates.
 //  3. No file is empty.
 //  4. Destructive statements (DROP TABLE/COLUMN/SCHEMA/DATABASE/TYPE, TRUNCATE, DELETE without WHERE,
@@ -14,7 +19,7 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const FILE_PATTERN = /^V(\d{4})__([a-z0-9_]+)\.sql$/;
+const FILE_PATTERN = /^S(\d{4})__([a-z0-9_]+)(\.notx)?\.sql$/;
 const APPROVAL_PATTERN = /^[ \t]*--[ \t]*approved-destructive:[ \t]*\S+/im; // reason must be on the same line
 
 /** Remove comments and string literals so words inside them are not mistaken for SQL. */
@@ -68,7 +73,7 @@ export function checkMigrations(dir) {
   for (const file of sqlFiles) {
     const match = FILE_PATTERN.exec(file);
     if (!match) {
-      problems.push(`${file}: name must look like V0001__short_description.sql (lowercase letters, digits, underscores).`);
+      problems.push(`${file}: name must look like S0001__short_description.sql (lowercase letters, digits, underscores), optionally S0001__name.notx.sql.`);
       continue;
     }
     versions.push(Number(match[1]));
@@ -97,7 +102,7 @@ export function checkMigrations(dir) {
   const unique = [...seen].sort((a, b) => a - b);
   unique.forEach((v, idx) => {
     if (v !== idx + 1) {
-      problems.push(`Version gap or bad start: expected V${String(idx + 1).padStart(4, "0")} but found V${String(v).padStart(4, "0")}.`);
+      problems.push(`Version gap or bad start: expected S${String(idx + 1).padStart(4, "0")} but found S${String(v).padStart(4, "0")}.`);
     }
   });
   return [...new Set(problems)];
@@ -106,7 +111,9 @@ export function checkMigrations(dir) {
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const dir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(here, "..", "database", "migrations");
+  const dir = process.argv[2]
+    ? path.resolve(process.argv[2])
+    : path.join(here, "..", "database", "sqlserver", "migrations");
   const problems = checkMigrations(dir);
   if (problems.length > 0) {
     console.error("Migration check FAILED:\n" + problems.map((p) => ` - ${p}`).join("\n"));

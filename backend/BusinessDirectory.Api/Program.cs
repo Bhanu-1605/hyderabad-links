@@ -4,9 +4,10 @@ using BusinessDirectory.Api.Auth;
 using BusinessDirectory.Api.Data;
 using BusinessDirectory.Api.Endpoints;
 using BusinessDirectory.Api.Media;
+using BusinessDirectory.Api.Notifications;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
-using Npgsql;
+using Microsoft.Data.SqlClient;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -48,11 +49,12 @@ builder.Services.AddProblemDetails();
 // (Development otherwise throws, and the global error handler would turn that into a 500.)
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 
-// Database: registered only when a connection string exists. Raw SQL through Npgsql, no ORM (decision D6).
+// Database: registered only when a connection string exists. Raw SQL through Microsoft.Data.SqlClient,
+// no ORM (decisions D6 and D41).
 var connectionString = builder.Configuration.GetConnectionString("Default");
 if (!string.IsNullOrWhiteSpace(connectionString))
 {
-    builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
+    builder.Services.AddSingleton(new SqlDatabase(connectionString));
 }
 builder.Services.AddHealthChecks()
     .AddCheck<DatabaseHealthCheck>("database", tags: ["ready"]);
@@ -87,6 +89,23 @@ else
     builder.Services.AddSingleton<ISmsSender, UnconfiguredSmsSender>();   // replaced by the MSG91 sender before launch
 }
 
+// ---- Notifications (email) -------------------------------------------------------------
+// Configured under `Email:` only. There is no provider adapter yet: Resend is the candidate
+// (decision D14) but it has never been configured or tested, and nothing here pretends otherwise.
+// In Development the message is written to this console; everywhere else sending throws, and the
+// Notifier records that as a failed notification instead of losing it (see V0010).
+var emailSettings = EmailSettings.Load(builder.Configuration);
+builder.Services.AddSingleton(emailSettings);
+builder.Services.AddSingleton<Notifier>();
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddSingleton<IEmailSender, ConsoleEmailSender>();   // prints the whole message in the API console
+}
+else
+{
+    builder.Services.AddSingleton<IEmailSender, UnconfiguredEmailSender>();   // replaced by a real provider once D14 is settled
+}
+
 // ---- Media storage (Azure Blob Storage; Azurite locally) --------------------------------
 // Configured by connection string only. With none set, uploads are refused rather than accepted
 // and silently dropped (see UnconfiguredMediaStorage).
@@ -117,6 +136,11 @@ builder.Services
         options.MapInboundClaims = false;
         options.TokenValidationParameters = tokenService.AdminValidationParameters;
     })
+    .AddJwtBearer(AdminAccess.SuperScheme, options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = tokenService.SuperAdminValidationParameters;
+    })
     // The two halfway states of an admin sign-in get schemes of their own, so a token issued after
     // the password but before the authenticator code cannot satisfy the admin policy at all.
     .AddJwtBearer(AdminAccess.MfaScheme, options =>
@@ -137,6 +161,9 @@ builder.Services.AddAuthorization(options =>
         .RequireAuthenticatedUser());
     options.AddPolicy(AdminAccess.Policy, policy => policy
         .AddAuthenticationSchemes(AdminAccess.Scheme)
+        .RequireAuthenticatedUser());
+    options.AddPolicy(AdminAccess.SuperPolicy, policy => policy
+        .AddAuthenticationSchemes(AdminAccess.SuperScheme)
         .RequireAuthenticatedUser());
     options.AddPolicy(AdminAccess.MfaPolicy, policy => policy
         .AddAuthenticationSchemes(AdminAccess.MfaScheme)
@@ -230,6 +257,8 @@ publicApi.MapPublicDirectoryEndpoints();
 publicApi.MapPublicSearchEndpoints();
 publicApi.MapPublicEnquiryEndpoints();   // customers contacting a business through its listing
 publicApi.MapPublicReviewEndpoints();     // approved reviews and the rating average
+publicApi.MapPublicSitemapEndpoints();    // every page the public site should list for search engines
+publicApi.MapPublicReportEndpoints();     // anyone reporting a listing or a review
 
 app.MapOwnerAuthEndpoints();   // /api/v1/auth/owner: request code, verify code, refresh, logout
 app.MapMeEndpoints();          // /api/v1/me: signed-in owner
@@ -237,6 +266,7 @@ app.MapMeEndpoints();          // /api/v1/me: signed-in owner
 app.MapAdminAuthEndpoints()   // /api/v1/auth/admin: email + password, then the mandatory second step
    .MapAdminMfaEndpoints();   // /mfa/verify and /mfa/enroll/*: where an admin session is actually created
 app.MapAdminEndpoints();       // /api/v1/admin: signed-in administrator, listing moderation
+app.MapSuperAdminEndpoints();  // /api/v1/super-admin: platform administration, its own token audience
 
 app.Run();
 

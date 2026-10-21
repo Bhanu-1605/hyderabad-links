@@ -126,6 +126,7 @@ export default async function HomePage() {
                 name={listing.name}
                 categoryName={listing.categoryName}
                 href={listing.url}
+                imageUrl={listing.logoUrl ?? listing.photoUrl}
               />
             ))}
           </div>

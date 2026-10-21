@@ -1,7 +1,8 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using BusinessDirectory.Api.Listings;
 using BusinessDirectory.Api.Media;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -80,9 +81,9 @@ public static class PublicDirectoryEndpoints
         return group;
     }
 
-    private static async Task<IResult> GetCities(NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetCities(SqlDatabase db, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("SELECT slug, name, state FROM cities WHERE is_active ORDER BY name");
+        await using var command = db.CreateCommand("SELECT slug, name, state FROM cities WHERE is_active = 1 ORDER BY name");
         await using var reader = await command.ExecuteReaderAsync(ct);
         var cities = new List<CityDto>();
         while (await reader.ReadAsync(ct))
@@ -92,13 +93,13 @@ public static class PublicDirectoryEndpoints
         return Results.Ok(cities);
     }
 
-    private static async Task<IResult> GetLocalities(string citySlug, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetLocalities(string citySlug, SqlDatabase db, CancellationToken ct)
     {
         await using var command = db.CreateCommand(
-            @"SELECT l.slug, l.name, ST_Y(l.center::geometry), ST_X(l.center::geometry)
+            @"SELECT l.slug, l.name, l.center.Lat, l.center.Long
               FROM localities l
               JOIN cities c ON c.id = l.city_id
-              WHERE c.slug = @city AND c.is_active AND l.is_active
+              WHERE c.slug = @city AND c.is_active = 1 AND l.is_active = 1
               ORDER BY l.name");
         command.Parameters.AddWithValue("city", citySlug);
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -115,14 +116,17 @@ public static class PublicDirectoryEndpoints
     ///
     /// The ranking is deliberate: names beginning with what was typed come first ("gachi" ->
     /// Gachibowli), then names containing it anywhere ("colony" -> KPHB Colony), then trigram
-    /// similarity so a misspelling still lands ("patan" -> Patancheru). The existing GIN trigram
-    /// index localities_name_trgm_idx serves both the ILIKE patterns and the % similarity operator.
+    /// similarity so a misspelling still lands ("patan" -> Patancheru).
+    ///
+    /// The similarity comes from stored trigrams (decision D42, migration S0008),
+/// using the threshold of 0.3 retained from the previous PostgreSQL implementation.
+/// This preserves the previously verified behaviour for locality suggestions.
     /// </summary>
     private static async Task<IResult> SearchLocalities(
         string? q,
         string? city,
         int? limit,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         var query = LocalitySearchQuery.TryCreate(q, city, limit, out var error);
@@ -132,19 +136,19 @@ public static class PublicDirectoryEndpoints
         }
 
         await using var command = db.CreateCommand(
-            @"SELECT l.slug, l.name, c.name, c.state
+            @"SELECT TOP (@max) l.slug, l.name, c.name, c.state
               FROM localities l
               JOIN cities c ON c.id = l.city_id
-              WHERE l.is_active AND c.is_active
-                AND (@city::text IS NULL OR c.slug = @city)
-                AND (l.name ILIKE @contains OR l.name % @text)
-              ORDER BY CASE WHEN l.name ILIKE @prefix THEN 0
-                            WHEN l.name ILIKE @contains THEN 1
-                            ELSE 2 END,
-                       similarity(l.name, @text) DESC,
-                       l.name
-              LIMIT @max");
-        command.Parameters.Add(new NpgsqlParameter("city", NpgsqlDbType.Text) { Value = (object?)query.CitySlug ?? DBNull.Value });
+              CROSS APPLY hl_similarity('locality', l.id, @text) sim
+              WHERE l.is_active = 1 AND c.is_active = 1
+                AND (@city IS NULL OR c.slug = @city)
+                AND (l.name LIKE @contains ESCAPE '\' OR sim.similarity >= 0.3)
+ORDER BY CASE WHEN l.name LIKE @prefix ESCAPE '\' THEN 0
+              WHEN l.name LIKE @contains ESCAPE '\' THEN 1
+              ELSE 2 END,
+                       sim.similarity DESC,
+                       l.name");
+        command.Parameters.Add(new SqlParameter("city", SqlDbType.NVarChar) { Value = (object?)query.CitySlug ?? DBNull.Value });
         command.Parameters.AddWithValue("text", query.Text);
         command.Parameters.AddWithValue("prefix", query.PrefixPattern);
         command.Parameters.AddWithValue("contains", query.ContainsPattern);
@@ -176,7 +180,7 @@ public static class PublicDirectoryEndpoints
     private static async Task<IResult> GetNearestLocality(
         double? lat,
         double? lng,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         var query = NearestLocalityQuery.TryCreate(lat, lng, out var error);
@@ -186,12 +190,14 @@ public static class PublicDirectoryEndpoints
         }
 
         await using var command = db.CreateCommand(
-            @"SELECT l.slug, l.name, c.name, c.state, ST_Distance(l.center, p.pt)
-              FROM (SELECT ST_SetSRID(ST_MakePoint(@lng, @lat), 4326)::geography AS pt) p
-              JOIN localities l ON l.is_active
-              JOIN cities c ON c.id = l.city_id AND c.is_active
-              ORDER BY l.center <-> p.pt
-              LIMIT 1");
+            /* STDistance is SQL Server's ST_Distance and answers in metres on a geography, exactly
+               as PostGIS did. The nearest row is TOP (1) by that distance: SQL Server has no <->
+               operator, and with a spatial index an ORDER BY on STDistance is the same plan. */
+            @"SELECT TOP (1) l.slug, l.name, c.name, c.state, l.center.STDistance(p.pt)
+              FROM (SELECT geography::Point(@lat, @lng, 4326) AS pt) p
+              JOIN localities l ON l.is_active = 1
+              JOIN cities c ON c.id = l.city_id AND c.is_active = 1
+              ORDER BY l.center.STDistance(p.pt)");
         command.Parameters.AddWithValue("lat", query.Latitude);
         command.Parameters.AddWithValue("lng", query.Longitude);
 
@@ -210,10 +216,17 @@ public static class PublicDirectoryEndpoints
             (int)Math.Round(reader.GetDouble(4))));
     }
 
-    private static async Task<IResult> GetCategories(NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetCategories(SqlDatabase db, CancellationToken ct)
     {
         await using var command = db.CreateCommand(
-            "SELECT id, parent_id, slug, name, search_terms FROM categories WHERE is_active ORDER BY level, sort_order, name");
+            /* search_terms was a text[] column; it is the category_search_terms table now, so the
+               words come back as one comma-separated string and are split here. A search term with a
+               comma in it would be split wrongly, which is why the seed does not use any. */
+            @"SELECT c.id, c.parent_id, c.slug, c.name,
+                     (SELECT STRING_AGG(t.term, ',') FROM category_search_terms t WHERE t.category_id = c.id)
+              FROM categories c
+              WHERE c.is_active = 1
+              ORDER BY c.level, c.sort_order, c.name");
         await using var reader = await command.ExecuteReaderAsync(ct);
 
         var parents = new List<(int Id, CategoryDto Dto)>();
@@ -231,7 +244,10 @@ public static class PublicDirectoryEndpoints
             }
             else if (childrenByParent.TryGetValue(reader.GetInt32(1), out var siblings))
             {
-                siblings.Add(new SubCategoryDto(slug, name, reader.GetFieldValue<string[]>(4)));
+                var terms = reader.IsDBNull(4)
+                    ? []
+                    : reader.GetString(4).Split(',', StringSplitOptions.RemoveEmptyEntries);
+                siblings.Add(new SubCategoryDto(slug, name, terms));
             }
         }
         return Results.Ok(parents.Select(p => p.Dto));
@@ -243,7 +259,7 @@ public static class PublicDirectoryEndpoints
         string? category,
         double? radiusKm,
         int? limit,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         CancellationToken ct)
     {
         if (lat is < -90 or > 90 || lng is < -180 or > 180)
@@ -255,26 +271,27 @@ public static class PublicDirectoryEndpoints
         var max = Math.Clamp(limit ?? 20, 1, 50);
 
         await using var command = db.CreateCommand(
-            @"SELECT li.slug, li.name, ci.slug, lo.slug, lo.name, pc.slug, pc.name,
-                     ST_Distance(li.location, p.pt), li.address_line, li.phone_primary, li.phone_whatsapp
-              FROM (SELECT ST_SetSRID(ST_MakePoint(@lng, @lat), 4326)::geography AS pt) p
-              JOIN listings li ON li.status = 'active' AND ST_DWithin(li.location, p.pt, @radius)
+            @"SELECT TOP (@max) li.slug, li.name, ci.slug, lo.slug, lo.name, pc.slug, pc.name,
+                     li.location.STDistance(p.pt), li.address_line, li.phone_primary, li.phone_whatsapp
+              FROM (SELECT geography::Point(@lat, @lng, 4326) AS pt) p
+              -- ST_DWithin(a, b, r) meant within r metres, which is a plain distance comparison
+              -- here. The spatial index is still used: SQL Server recognises STDistance() <= value.
+              JOIN listings li ON li.status = 'active' AND li.location.STDistance(p.pt) <= @radius
               JOIN localities lo ON lo.id = li.locality_id
               JOIN cities ci ON ci.id = lo.city_id
-              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary
+              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary = 1
               JOIN categories pc ON pc.id = lc.category_id
-              WHERE (@cat::text IS NULL OR EXISTS (
+              WHERE (@cat IS NULL OR EXISTS (
                         SELECT 1
                         FROM listing_categories x
                         JOIN categories xc ON xc.id = x.category_id
                         LEFT JOIN categories xp ON xp.id = xc.parent_id
                         WHERE x.listing_id = li.id AND (xc.slug = @cat OR xp.slug = @cat)))
-              ORDER BY li.location <-> p.pt
-              LIMIT @max");
+              ORDER BY li.location.STDistance(p.pt)");
         command.Parameters.AddWithValue("lat", lat);
         command.Parameters.AddWithValue("lng", lng);
         command.Parameters.AddWithValue("radius", radiusMetres);
-        command.Parameters.Add(new NpgsqlParameter("cat", NpgsqlDbType.Text) { Value = (object?)category ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("cat", SqlDbType.NVarChar) { Value = (object?)category ?? DBNull.Value });
         command.Parameters.AddWithValue("max", max);
 
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -303,16 +320,16 @@ public static class PublicDirectoryEndpoints
     }
 
     private static async Task<IResult> GetListing(
-        string citySlug, string localitySlug, string slug, NpgsqlDataSource db, IMediaStorage storage, CancellationToken ct)
+        string citySlug, string localitySlug, string slug, SqlDatabase db, IMediaStorage storage, CancellationToken ct)
     {
         await using var command = db.CreateCommand(
             @"SELECT li.slug, li.name, li.description, li.address_line, li.pincode, li.phone_primary, li.phone_whatsapp,
-                     li.website_url, ST_Y(li.location::geometry), ST_X(li.location::geometry),
+                     li.website_url, li.location.Lat, li.location.Long,
                      ci.slug, ci.name, lo.slug, lo.name, pc.slug, pc.name, li.id
               FROM listings li
               JOIN localities lo ON lo.id = li.locality_id
               JOIN cities ci ON ci.id = lo.city_id
-              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary
+              JOIN listing_categories lc ON lc.listing_id = li.id AND lc.is_primary = 1
               JOIN categories pc ON pc.id = lc.category_id
               WHERE ci.slug = @city AND lo.slug = @locality AND li.slug = @slug AND li.status = 'active'");
         command.Parameters.AddWithValue("city", citySlug);
@@ -354,12 +371,12 @@ public static class PublicDirectoryEndpoints
 
     /// <summary>The listing's visible media, logo first, then photos, then video, each in its display order.</summary>
     private static async Task<List<PublicMediaDto>> ReadPublicMedia(
-        NpgsqlDataSource db, long listingId, IMediaStorage storage, CancellationToken ct)
+        SqlDatabase db, long listingId, IMediaStorage storage, CancellationToken ct)
     {
         await using var command = db.CreateCommand(
             @"SELECT kind, storage_key, width, height
               FROM listing_media
-              WHERE listing_id = @listing AND NOT is_hidden
+              WHERE listing_id = @listing AND is_hidden = 0
               ORDER BY CASE kind WHEN 'logo' THEN 0 WHEN 'photo' THEN 1 ELSE 2 END, sort_order, id");
         command.Parameters.AddWithValue("listing", listingId);
 

@@ -1,8 +1,10 @@
 "use server";
 
-import { sendEnquiry } from "@/lib/api";
-import { submitReview } from "@/lib/owner-api";
+import { revalidatePath } from "next/cache";
+import { reportListing, sendEnquiry } from "@/lib/api";
+import { forgetFavourite, saveFavourite, submitReview } from "@/lib/owner-api";
 import type { EnquiryFormState } from "./enquiry-state";
+import type { FavouriteState, ReportFormState } from "./report-state";
 import type { ReviewFormState } from "./review-state";
 
 /**
@@ -64,4 +66,50 @@ export async function submitReviewAction(
   }
 
   return { values, fieldErrors: {}, submitted: true };
+}
+
+/**
+ * Reports a listing. No account is needed, by design: the people most likely to spot a fake listing
+ * are the customers it tried to catch. The API counts the per-address limits and decides.
+ */
+export async function reportListingAction(
+  _previous: ReportFormState,
+  formData: FormData,
+): Promise<ReportFormState> {
+  const read = (field: string) => String(formData.get(field) ?? "").trim();
+  const values = { reason: read("reason"), details: read("details") };
+
+  if (values.reason === "") {
+    return { values, message: "Please fix the fields marked below.", fieldErrors: { reason: "Choose a reason." } };
+  }
+
+  const result = await reportListing(
+    { city: read("city"), locality: read("locality"), slug: read("slug") },
+    values,
+  );
+
+  if (!result.ok) {
+    return { values, message: result.message, fieldErrors: result.fieldErrors };
+  }
+
+  return { values, fieldErrors: {}, sent: true };
+}
+
+/**
+ * Saves or unsaves a listing for the signed-in person. The pressed state comes from the server on
+ * the next render, so this only reports a failure.
+ */
+export async function toggleFavouriteAction(
+  target: { city: string; locality: string; slug: string },
+  currentlySaved: boolean,
+): Promise<FavouriteState> {
+  const result = currentlySaved ? await forgetFavourite(target) : await saveFavourite(target);
+  if (!result.ok) {
+    return { saved: currentlySaved, message: "We could not save that just now. Please try again." };
+  }
+
+  // The listing page shows the pressed state, so it has to be re-rendered.
+  revalidatePath(`/${target.city}/${target.locality}`, "layout");
+  revalidatePath("/account/favourites");
+  return { saved: !currentlySaved };
 }

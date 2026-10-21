@@ -41,6 +41,17 @@ export type ListingMedia = {
   height: number | null;
 };
 
+/** One URL for the sitemap. `lastModified` is only known for listings. */
+export type SitemapEntry = { url: string; lastModified: string | null };
+
+/** `truncated` is true when there are more live listings than one sitemap file may hold. */
+export type Sitemap = {
+  listings: SitemapEntry[];
+  localities: SitemapEntry[];
+  categories: SitemapEntry[];
+  truncated: boolean;
+};
+
 /** Flat, search-friendly view of the category tree (sub-categories first, then parents). */
 export type SearchCategory = { slug: string; name: string; terms: string[] };
 
@@ -58,6 +69,10 @@ export type SearchListing = {
   phonePrimary: string;
   phoneWhatsapp: string | null;
   url: string;
+  /** The uploaded logo, or null when there is none - the card then shows a monogram. */
+  logoUrl: string | null;
+  /** The first photo, used as the card image when there is no logo. */
+  photoUrl: string | null;
 };
 
 /** A page of search results. `total` counts every match, not just this page. */

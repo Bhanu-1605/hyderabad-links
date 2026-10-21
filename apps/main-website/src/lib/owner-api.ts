@@ -235,6 +235,34 @@ export const submitReview = (
 
 export const listMyReviews = () => authed<MyReview[]>("/api/v1/me/reviews");
 
+/**
+ * A listing this person saved. `isAvailable` is false once it stops being live: the entry is
+ * kept, because they saved it, but it is not offered as somewhere to go.
+ */
+export type Favourite = {
+  listingId: number;
+  name: string;
+  categoryName: string;
+  localityName: string;
+  phonePrimary: string;
+  url: string;
+  logoUrl: string | null;
+  isAvailable: boolean;
+  savedAt: string;
+};
+
+const favouritePath = (target: { city: string; locality: string; slug: string }) =>
+  "/api/v1/me/favourites/" + [target.city, target.locality, target.slug].map(encodeURIComponent).join("/");
+
+export const listFavourites = () => authed<Favourite[]>("/api/v1/me/favourites");
+
+/** PUT, not POST: saving one that is already saved is the same favourite. */
+export const saveFavourite = (target: { city: string; locality: string; slug: string }) =>
+  authed<void>(favouritePath(target), { method: "PUT" });
+
+export const forgetFavourite = (target: { city: string; locality: string; slug: string }) =>
+  authed<void>(favouritePath(target), { method: "DELETE" });
+
 export const listMyListings = () => authed<OwnerListing[]>("/api/v1/me/listings");
 export const getMyListing = (id: number) => authed<OwnerListing>(`/api/v1/me/listings/${id}`);
 export const createListing = (input: ListingFormInput) =>
@@ -279,6 +307,10 @@ export type ListingMediaAllowance = {
 export type ListingMedia = { allowance: ListingMediaAllowance; items: ListingMediaItem[] };
 
 export const getListingMedia = (id: number) => authed<ListingMedia>(`/api/v1/me/listings/${id}/media`);
+
+/** Moves one photo one place earlier or later within its own kind. */
+export const moveListingMedia = (id: number, mediaId: number, direction: "up" | "down") =>
+  authed<void>(`/api/v1/me/listings/${id}/media/${mediaId}/move?direction=${direction}`, { method: "POST" });
 
 export const deleteListingMedia = (id: number, mediaId: number) =>
   authed<void>(`/api/v1/me/listings/${id}/media/${mediaId}`, { method: "DELETE" });

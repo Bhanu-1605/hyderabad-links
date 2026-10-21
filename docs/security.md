@@ -4,8 +4,7 @@
 Separate token audiences: `owner`, `admin`, `superadmin`. A token from one realm is never accepted by another.
 
 ## Business-owner OTP (Phase 3)
-Normalise to E.164; verify bot-protection token; resend cooldown + per-phone and per-IP limits stored in PostgreSQL (works across
-instances); 6-digit code from a cryptographic RNG; store only an HMAC hash (key in Key Vault); 5-minute expiry; max 5 attempts;
+Normalise to E.164; verify bot-protection token; resend cooldown + per-phone and per-IP limits stored in Microsoft SQL Server (Azure SQL Database in production; works across instances); 6-digit code from a cryptographic RNG; store only an HMAC hash (key in Key Vault); 5-minute expiry; max 5 attempts;
 identical response whether or not the number has an account; constant-time comparison. SMS provider behind `ISmsSender`.
 Dev-only test OTP requires Development environment AND an explicit flag; the app refuses to start if enabled elsewhere.
 

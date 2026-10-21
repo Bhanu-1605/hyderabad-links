@@ -1,6 +1,7 @@
+using BusinessDirectory.Api.Data;
 using System.Security.Claims;
 using Microsoft.IdentityModel.JsonWebTokens;
-using Npgsql;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
@@ -23,6 +24,7 @@ public static class MeEndpoints
         group.MapOwnerEnquiryEndpoints();
         group.MapCustomerReviewEndpoints();
         group.MapOwnerProfileEndpoints();
+        group.MapFavouriteEndpoints();   // listings this person saved; private to them
         group.MapOwnerListingEndpoints();
         return group;
     }
@@ -34,7 +36,7 @@ public static class MeEndpoints
         return long.TryParse(sub, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out userId);
     }
 
-    private static async Task<IResult> GetMe(ClaimsPrincipal principal, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> GetMe(ClaimsPrincipal principal, SqlDatabase db, CancellationToken ct)
     {
         if (!TryGetUserId(principal, out var userId))
         {

@@ -2,7 +2,16 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { adminLogout, approveListing, createListing, rejectListing, updateListing, type ListingFormInput } from "@/lib/admin-api";
+import {
+  adminLogout,
+  approveListing,
+  createListing,
+  reinstateListing,
+  rejectListing,
+  suspendListing,
+  updateListing,
+  type ListingFormInput,
+} from "@/lib/admin-api";
 import { pagesAffectedBy, revalidatePublicPages } from "@/lib/revalidate";
 import { clearSessionCookies, readTokens } from "@/lib/session";
 import type { DecisionState } from "./decision-state";
@@ -75,6 +84,34 @@ export async function saveListingAction(
 
   if (listingId === null) redirect(`/listings/${result.data.id}?added=1`);
   return { rev, values, success: true, message: "Changes saved.", fieldErrors: {} };
+}
+
+/**
+ * Takes a live listing off the site, or puts a suspended one back. Same shape as decideAction:
+ * the pressed button says which, and the API decides whether this admin may do it.
+ */
+export async function liveStatusAction(
+  listingId: number,
+  _previous: DecisionState,
+  formData: FormData,
+): Promise<DecisionState> {
+  const suspending = formData.get("intent") === "suspend";
+  const reason = String(formData.get("reason") ?? "");
+
+  if (suspending && reason.trim() === "") {
+    return { error: "Say why it is being suspended. The owner sees this.", reason };
+  }
+
+  const result = suspending ? await suspendListing(listingId, reason) : await reinstateListing(listingId);
+  if (!result.ok) {
+    return { error: Object.values(result.fieldErrors)[0] ?? result.message, reason };
+  }
+
+  // It has just left or rejoined the public site, so refresh those pages now.
+  await revalidatePublicPages(pagesAffectedBy(result.data));
+  revalidatePath("/listings");
+  revalidatePath("/listings/" + listingId);
+  redirect("/listings/" + listingId + "?live=" + (suspending ? "suspended" : "reinstated"));
 }
 
 export async function signOutAction(): Promise<void> {

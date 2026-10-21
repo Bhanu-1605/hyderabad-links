@@ -1,6 +1,7 @@
+using BusinessDirectory.Api.Data;
 using System.Security.Claims;
 using Microsoft.IdentityModel.JsonWebTokens;
-using Npgsql;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Auth;
 
@@ -38,18 +39,42 @@ public static class AdminAccess
     public const string EnrollScheme = "AdminEnrollBearer";
     public const string EnrollPolicy = "AdminEnroll";
 
+    /// <summary>
+    /// Platform administration. Its own scheme and policy, accepting only the super-admin audience,
+    /// so an ordinary administrator's token never reaches these routes whatever permissions the
+    /// account happens to hold.
+    /// </summary>
+    public const string SuperScheme = "SuperAdminBearer";
+    public const string SuperPolicy = "SuperAdmin";
+
+    /* PostgreSQL returned the roles and permissions as two text arrays. SQL Server has no array
+       type, so each comes back as one comma-separated string that Load() splits. The subqueries
+       replace array_agg(DISTINCT ...) FILTER (WHERE ... IS NOT NULL): STRING_AGG has no DISTINCT and
+       no FILTER, and a SELECT DISTINCT inside it says the same thing more plainly anyway.
+       An account with no roles yields NULL, which Load() reads as an empty list. */
     private const string LoadSql =
         @"SELECT au.email,
                  au.display_name,
-                 COALESCE(array_agg(DISTINCT r.slug) FILTER (WHERE r.slug IS NOT NULL), '{}'),
-                 COALESCE(array_agg(DISTINCT p.code) FILTER (WHERE p.code IS NOT NULL), '{}')
+                 (SELECT STRING_AGG(x.slug, ',')
+                  FROM (SELECT DISTINCT r.slug
+                        FROM admin_user_roles aur
+                        JOIN roles r ON r.id = aur.role_id
+                        WHERE aur.admin_user_id = au.id) x),
+                 (SELECT STRING_AGG(x.code, ',')
+                  FROM (SELECT DISTINCT p.code
+                        FROM admin_user_roles aur
+                        JOIN role_permissions rp ON rp.role_id = aur.role_id
+                        JOIN permissions p ON p.id = rp.permission_id
+                        WHERE aur.admin_user_id = au.id) x)
           FROM admin_users au
-          LEFT JOIN admin_user_roles aur ON aur.admin_user_id = au.id
-          LEFT JOIN roles r ON r.id = aur.role_id
-          LEFT JOIN role_permissions rp ON rp.role_id = r.id
-          LEFT JOIN permissions p ON p.id = rp.permission_id
-          WHERE au.id = @id AND au.status = 'active'
-          GROUP BY au.id, au.email, au.display_name";
+          WHERE au.id = @id AND au.status = 'active'";
+
+    /// <summary>
+    /// Reads one of the comma-separated lists above. Null means the account holds none, which is an
+    /// empty list rather than a missing one: a signed-in admin with no role is a real state.
+    /// </summary>
+    private static string[] SplitList(SqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? [] : reader.GetString(ordinal).Split(',', StringSplitOptions.RemoveEmptyEntries);
 
     public static bool TryGetAdminId(ClaimsPrincipal principal, out long adminUserId)
     {
@@ -57,8 +82,27 @@ public static class AdminAccess
         return long.TryParse(sub, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out adminUserId);
     }
 
+    /// <summary>
+    /// Whether this account holds <c>admins.manage</c>, asked inside the caller's own transaction.
+    /// Used when a session is opened, to decide whether to mint a super-admin token alongside the
+    /// admin one. Read from the database rather than from the token, like every other permission.
+    /// </summary>
+    public static async Task<bool> HoldsSuperAdmin(
+        SqlConnection conn, SqlTransaction? tx, long adminUserId, CancellationToken ct)
+    {
+        await using var command = new SqlCommand(
+            @"SELECT TOP (1) 1
+              FROM admin_user_roles aur
+              JOIN role_permissions rp ON rp.role_id = aur.role_id
+              JOIN permissions p ON p.id = rp.permission_id
+              WHERE aur.admin_user_id = @id AND p.code = @permission", conn, tx);
+        command.Parameters.AddWithValue("id", adminUserId);
+        command.Parameters.AddWithValue("permission", AdminPermissions.AdminsManage);
+        return await command.ExecuteScalarAsync(ct) is not null;
+    }
+
     /// <summary>Returns null when the token's subject is not an active admin any more.</summary>
-    public static async Task<AdminIdentity?> Load(NpgsqlDataSource db, ClaimsPrincipal principal, CancellationToken ct)
+    public static async Task<AdminIdentity?> Load(SqlDatabase db, ClaimsPrincipal principal, CancellationToken ct)
     {
         if (!TryGetAdminId(principal, out var adminUserId))
         {
@@ -77,8 +121,8 @@ public static class AdminAccess
             adminUserId,
             reader.GetString(0),
             reader.GetString(1),
-            reader.GetFieldValue<string[]>(2),
-            reader.GetFieldValue<string[]>(3));
+            SplitList(reader, 2),
+            SplitList(reader, 3));
     }
 
     /// <summary>
@@ -89,6 +133,20 @@ public static class AdminAccess
     public static IResult? Authorize(AdminIdentity admin, string permission)
     {
         if (!AdminPermissions.IsAdminSurface(permission) || !admin.Can(permission))
+        {
+            return Results.Problem("You do not have permission to do that.", statusCode: StatusCodes.Status403Forbidden);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The same check for the super-admin surface, and the mirror image of the rule above: only a
+    /// permission reserved for that surface may be required here. The audience has already been
+    /// validated by the scheme; this is the second gate, read live from the database.
+    /// </summary>
+    public static IResult? AuthorizeSuper(AdminIdentity admin, string permission)
+    {
+        if (!AdminPermissions.SuperAdminOnly.Contains(permission) || !admin.Can(permission))
         {
             return Results.Problem("You do not have permission to do that.", statusCode: StatusCodes.Status403Forbidden);
         }

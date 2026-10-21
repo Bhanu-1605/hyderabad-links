@@ -1,13 +1,14 @@
+using BusinessDirectory.Api.Data;
+using System.Data;
 using System.Net;
 using BusinessDirectory.Api.Auth;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.Data.SqlClient;
 
 namespace BusinessDirectory.Api.Endpoints;
 
 /// <summary>
 /// Business-owner login by phone OTP, under /api/v1/auth/owner. Raw parameterised SQL, no ORM.
-/// Rate limits live in PostgreSQL (counted from otp_challenges), so they hold across several API instances.
+/// Rate limits live in SQL Server (counted from otp_challenges), so they hold across several API instances.
 /// The browser never calls these directly: the Next.js server calls them and keeps the tokens in httpOnly cookies.
 /// </summary>
 public static class OwnerAuthEndpoints
@@ -38,7 +39,7 @@ public static class OwnerAuthEndpoints
     private static async Task<IResult> RequestOtp(
         RequestOtpRequest request,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         AuthSettings settings,
         ISmsSender sms,
         CancellationToken ct)
@@ -52,13 +53,18 @@ public static class OwnerAuthEndpoints
 
         await using (var check = db.CreateCommand(
             @"SELECT
-                (SELECT count(*) FROM otp_challenges WHERE phone_e164 = @phone AND created_at > now() - interval '1 hour'),
-                COALESCE((SELECT max(created_at) FROM otp_challenges WHERE phone_e164 = @phone) > now() - make_interval(secs => @cooldown), false),
-                (SELECT count(*) FROM otp_challenges WHERE requester_ip = @ip AND created_at > now() - interval '1 hour')"))
+                (SELECT COUNT_BIG(*) FROM otp_challenges WHERE phone_e164 = @phone AND created_at > DATEADD(hour, -1, SYSDATETIMEOFFSET())),
+                -- Was the last code sent within the cooldown? A yes/no answer, which in SQL Server
+                -- has to be a CASE producing a bit. No row at all means no, as the COALESCE said.
+                CAST(CASE WHEN (SELECT max(created_at) FROM otp_challenges WHERE phone_e164 = @phone)
+                             > DATEADD(second, -@cooldown, SYSDATETIMEOFFSET())
+                          THEN 1 ELSE 0 END AS bit),
+                (SELECT COUNT_BIG(*) FROM otp_challenges WHERE requester_ip = @ip AND created_at > DATEADD(hour, -1, SYSDATETIMEOFFSET()))"))
         {
             check.Parameters.AddWithValue("phone", phone);
-            check.Parameters.AddWithValue("cooldown", (double)settings.ResendCooldownSeconds);
-            check.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+            // int, not double: DATEADD takes a whole number of seconds.
+            check.Parameters.AddWithValue("cooldown", settings.ResendCooldownSeconds);
+            check.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
 
             await using var reader = await check.ExecuteReaderAsync(ct);
             await reader.ReadAsync(ct);
@@ -77,12 +83,12 @@ public static class OwnerAuthEndpoints
 
         await using (var insert = db.CreateCommand(
             @"INSERT INTO otp_challenges (phone_e164, code_hash, expires_at, requester_ip)
-              VALUES (@phone, @hash, now() + make_interval(secs => @ttl), @ip)"))
+              VALUES (@phone, @hash, DATEADD(second, @ttl, SYSDATETIMEOFFSET()), @ip)"))
         {
             insert.Parameters.AddWithValue("phone", phone);
-            insert.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = hash });
-            insert.Parameters.AddWithValue("ttl", (double)settings.OtpTtlSeconds);
-            insert.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
+            insert.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = hash });
+            insert.Parameters.AddWithValue("ttl", settings.OtpTtlSeconds);
+            insert.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
             await insert.ExecuteNonQueryAsync(ct);
         }
 
@@ -103,7 +109,7 @@ public static class OwnerAuthEndpoints
     private static async Task<IResult> VerifyOtp(
         VerifyOtpRequest request,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         AuthSettings settings,
         TokenService tokens,
         CancellationToken ct)
@@ -114,20 +120,22 @@ public static class OwnerAuthEndpoints
         }
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         // Lock the newest usable challenge for this phone so concurrent guesses are counted one at a time.
         long challengeId;
         byte[] storedHash;
         int attempts;
         int maxAttempts;
-        await using (var find = new NpgsqlCommand(
-            @"SELECT id, code_hash, attempts, max_attempts
-              FROM otp_challenges
-              WHERE phone_e164 = @phone AND consumed_at IS NULL AND expires_at > now()
-              ORDER BY created_at DESC
-              LIMIT 1
-              FOR UPDATE", conn, tx))
+        await using (var find = new SqlCommand(
+            /* The row is locked as it is read, so two requests for the same one queue rather than
+               both acting on what they saw. PostgreSQL wrote that as FOR UPDATE after the query;
+               SQL Server puts it on the table as a hint. HOLDLOCK keeps it to the end of the
+               transaction, which is what FOR UPDATE did. */
+            @"SELECT TOP (1) id, code_hash, attempts, max_attempts
+              FROM otp_challenges WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
+              WHERE phone_e164 = @phone AND consumed_at IS NULL AND expires_at > SYSDATETIMEOFFSET()
+              ORDER BY created_at DESC", conn, tx))
         {
             find.Parameters.AddWithValue("phone", phone);
             await using var reader = await find.ExecuteReaderAsync(ct);
@@ -147,7 +155,7 @@ public static class OwnerAuthEndpoints
         }
 
         // Count the attempt first, and commit it even when the guess is wrong.
-        await using (var bump = new NpgsqlCommand("UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = @id", conn, tx))
+        await using (var bump = new SqlCommand("UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = @id", conn, tx))
         {
             bump.Parameters.AddWithValue("id", challengeId);
             await bump.ExecuteNonQueryAsync(ct);
@@ -159,7 +167,7 @@ public static class OwnerAuthEndpoints
             return Results.Problem(InvalidCodeMessage, statusCode: StatusCodes.Status400BadRequest);
         }
 
-        await using (var consume = new NpgsqlCommand("UPDATE otp_challenges SET consumed_at = now() WHERE id = @id AND consumed_at IS NULL", conn, tx))
+        await using (var consume = new SqlCommand("UPDATE otp_challenges SET consumed_at = SYSDATETIMEOFFSET() WHERE id = @id AND consumed_at IS NULL", conn, tx))
         {
             consume.Parameters.AddWithValue("id", challengeId);
             if (await consume.ExecuteNonQueryAsync(ct) != 1)
@@ -171,15 +179,41 @@ public static class OwnerAuthEndpoints
         // First successful login creates the account.
         long userId;
         string userStatus;
-        await using (var upsert = new NpgsqlCommand(
-            @"INSERT INTO users (phone_e164, phone_verified_at) VALUES (@phone, now())
-              ON CONFLICT (phone_e164) DO UPDATE
-                SET phone_verified_at = COALESCE(users.phone_verified_at, now()), updated_at = now()
-              RETURNING id, status", conn, tx))
+        await using (var upsert = new SqlCommand(
+            /* "create the account on first sign-in, otherwise stamp the existing one", which
+               PostgreSQL wrote as ON CONFLICT ... DO UPDATE.
+
+               The UPDATE runs first and outputs the row when there was one; the INSERT runs only
+               when it did not, and outputs the new row. Exactly one of them produces a row, so the
+               reader below still reads one. The unique constraint on phone_e164 remains the real
+               guard if two sign-ins for one number arrive together: the loser gets a duplicate-key
+               error and retries into the UPDATE branch.
+
+               COALESCE keeps the original verification moment rather than moving it forward. */
+            @"UPDATE users
+              SET phone_verified_at = COALESCE(phone_verified_at, SYSDATETIMEOFFSET()),
+                  updated_at = SYSDATETIMEOFFSET()
+              OUTPUT inserted.id, inserted.status
+              WHERE phone_e164 = @phone;
+
+              INSERT INTO users (phone_e164, phone_verified_at)
+              OUTPUT inserted.id, inserted.status
+              SELECT @phone, SYSDATETIMEOFFSET()
+              WHERE NOT EXISTS (SELECT 1 FROM users WHERE phone_e164 = @phone)", conn, tx))
         {
             upsert.Parameters.AddWithValue("phone", phone);
             await using var reader = await upsert.ExecuteReaderAsync(ct);
-            await reader.ReadAsync(ct);
+
+            /* Two statements, so two result sets, and the one that did nothing is empty. Whichever
+               ran is the one with a row in it, so walk forward until a row appears. */
+            while (!await reader.ReadAsync(ct))
+            {
+                if (!await reader.NextResultAsync(ct))
+                {
+                    throw new InvalidOperationException("The sign-in upsert produced no row.");
+                }
+            }
+
             userId = reader.GetInt64(0);
             userStatus = reader.GetString(1);
         }
@@ -191,9 +225,9 @@ public static class OwnerAuthEndpoints
         }
 
         var refreshToken = TokenService.NewRefreshToken();
-        await using (var session = new NpgsqlCommand(
+        await using (var session = new SqlCommand(
             @"INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at, ip, user_agent)
-              VALUES (@user, @hash, now() + make_interval(days => @days), @ip, @ua)", conn, tx))
+              VALUES (@user, @hash, DATEADD(day, @days, SYSDATETIMEOFFSET()), @ip, @ua)", conn, tx))
         {
             AddSessionParameters(session, userId, refreshToken, settings, http);
             await session.ExecuteNonQueryAsync(ct);
@@ -209,7 +243,7 @@ public static class OwnerAuthEndpoints
     private static async Task<IResult> Refresh(
         RefreshRequest request,
         HttpContext http,
-        NpgsqlDataSource db,
+        SqlDatabase db,
         AuthSettings settings,
         TokenService tokens,
         CancellationToken ct)
@@ -222,20 +256,25 @@ public static class OwnerAuthEndpoints
         var presentedHash = TokenService.HashRefreshToken(request.RefreshToken);
 
         await using var conn = await db.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginSqlTransactionAsync(ct);
 
         long sessionId;
         long userId;
         Guid familyId;
         bool expired;
         bool alreadyUsed;
-        await using (var find = new NpgsqlCommand(
-            @"SELECT id, user_id, family_id, expires_at <= now(), (rotated_at IS NOT NULL OR revoked_at IS NOT NULL)
-              FROM user_sessions
-              WHERE refresh_token_hash = @hash
-              FOR UPDATE", conn, tx))
+        await using (var find = new SqlCommand(
+            /* The row is locked as it is read, so two requests for the same one queue rather than
+               both acting on what they saw. PostgreSQL wrote that as FOR UPDATE after the query;
+               SQL Server puts it on the table as a hint. HOLDLOCK keeps it to the end of the
+               transaction, which is what FOR UPDATE did. */
+            @"SELECT id, user_id, family_id,
+                     CAST(CASE WHEN expires_at <= SYSDATETIMEOFFSET() THEN 1 ELSE 0 END AS bit),
+                     CAST(CASE WHEN rotated_at IS NOT NULL OR revoked_at IS NOT NULL THEN 1 ELSE 0 END AS bit)
+              FROM user_sessions WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
+              WHERE refresh_token_hash = @hash", conn, tx))
         {
-            find.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = presentedHash });
+            find.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = presentedHash });
             await using var reader = await find.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct))
             {
@@ -251,8 +290,8 @@ public static class OwnerAuthEndpoints
         if (alreadyUsed)
         {
             // A token that was already rotated or revoked is being presented again: assume theft and end the whole family.
-            await using var revoke = new NpgsqlCommand(
-                "UPDATE user_sessions SET revoked_at = now(), revoked_reason = 'reuse_detected' WHERE family_id = @family AND revoked_at IS NULL", conn, tx);
+            await using var revoke = new SqlCommand(
+                "UPDATE user_sessions SET revoked_at = SYSDATETIMEOFFSET(), revoked_reason = 'reuse_detected' WHERE family_id = @family AND revoked_at IS NULL", conn, tx);
             revoke.Parameters.AddWithValue("family", familyId);
             await revoke.ExecuteNonQueryAsync(ct);
             await tx.CommitAsync(ct);
@@ -264,7 +303,7 @@ public static class OwnerAuthEndpoints
             return Results.Unauthorized();
         }
 
-        await using (var status = new NpgsqlCommand("SELECT status FROM users WHERE id = @id", conn, tx))
+        await using (var status = new SqlCommand("SELECT status FROM users WHERE id = @id", conn, tx))
         {
             status.Parameters.AddWithValue("id", userId);
             if ((string?)await status.ExecuteScalarAsync(ct) != "active")
@@ -273,16 +312,16 @@ public static class OwnerAuthEndpoints
             }
         }
 
-        await using (var rotate = new NpgsqlCommand("UPDATE user_sessions SET rotated_at = now() WHERE id = @id", conn, tx))
+        await using (var rotate = new SqlCommand("UPDATE user_sessions SET rotated_at = SYSDATETIMEOFFSET() WHERE id = @id", conn, tx))
         {
             rotate.Parameters.AddWithValue("id", sessionId);
             await rotate.ExecuteNonQueryAsync(ct);
         }
 
         var newRefreshToken = TokenService.NewRefreshToken();
-        await using (var insert = new NpgsqlCommand(
+        await using (var insert = new SqlCommand(
             @"INSERT INTO user_sessions (user_id, family_id, refresh_token_hash, expires_at, ip, user_agent)
-              VALUES (@user, @family, @hash, now() + make_interval(days => @days), @ip, @ua)", conn, tx))
+              VALUES (@user, @family, @hash, DATEADD(day, @days, SYSDATETIMEOFFSET()), @ip, @ua)", conn, tx))
         {
             AddSessionParameters(insert, userId, newRefreshToken, settings, http);
             insert.Parameters.AddWithValue("family", familyId);
@@ -296,15 +335,15 @@ public static class OwnerAuthEndpoints
     }
 
     // ------------------------------------------------------------------ sign out
-    private static async Task<IResult> Logout(RefreshRequest request, NpgsqlDataSource db, CancellationToken ct)
+    private static async Task<IResult> Logout(RefreshRequest request, SqlDatabase db, CancellationToken ct)
     {
         if (!string.IsNullOrWhiteSpace(request.RefreshToken) && request.RefreshToken.Length <= 200)
         {
             await using var command = db.CreateCommand(
-                @"UPDATE user_sessions SET revoked_at = now(), revoked_reason = 'logout'
+                @"UPDATE user_sessions SET revoked_at = SYSDATETIMEOFFSET(), revoked_reason = 'logout'
                   WHERE revoked_at IS NULL
                     AND family_id = (SELECT family_id FROM user_sessions WHERE refresh_token_hash = @hash)");
-            command.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = TokenService.HashRefreshToken(request.RefreshToken) });
+            command.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = TokenService.HashRefreshToken(request.RefreshToken) });
             await command.ExecuteNonQueryAsync(ct);
         }
 
@@ -312,7 +351,7 @@ public static class OwnerAuthEndpoints
         return Results.NoContent();
     }
 
-    private static void AddSessionParameters(NpgsqlCommand command, long userId, string refreshToken, AuthSettings settings, HttpContext http)
+    private static void AddSessionParameters(SqlCommand command, long userId, string refreshToken, AuthSettings settings, HttpContext http)
     {
         var userAgent = http.Request.Headers.UserAgent.ToString();
         if (userAgent.Length > 300)
@@ -322,9 +361,9 @@ public static class OwnerAuthEndpoints
 
         IPAddress? ip = http.Connection.RemoteIpAddress;
         command.Parameters.AddWithValue("user", userId);
-        command.Parameters.Add(new NpgsqlParameter("hash", NpgsqlDbType.Bytea) { Value = TokenService.HashRefreshToken(refreshToken) });
+        command.Parameters.Add(new SqlParameter("hash", SqlDbType.VarBinary) { Value = TokenService.HashRefreshToken(refreshToken) });
         command.Parameters.AddWithValue("days", settings.RefreshTokenDays);
-        command.Parameters.Add(new NpgsqlParameter("ip", NpgsqlDbType.Inet) { Value = (object?)ip ?? DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter("ua", NpgsqlDbType.Text) { Value = string.IsNullOrEmpty(userAgent) ? DBNull.Value : userAgent });
+        command.Parameters.Add(new SqlParameter("ip", SqlDbType.VarChar) { Value = (object?)ip?.ToString() ?? DBNull.Value });
+        command.Parameters.Add(new SqlParameter("ua", SqlDbType.NVarChar) { Value = string.IsNullOrEmpty(userAgent) ? DBNull.Value : userAgent });
     }
 }

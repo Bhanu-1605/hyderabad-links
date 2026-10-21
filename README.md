@@ -2,7 +2,7 @@
 
 Location-first business directory for Hyderabad, Telangana. Public site: **https://hyderabadlinks.com**.
 
-Three independent Next.js websites share **one ASP.NET Core API** and **one PostgreSQL (PostGIS) database**.
+Three independent Next.js websites share **one ASP.NET Core API** and **one Microsoft SQL Server database** (Azure SQL Database in production).
 
 | App | Folder | Local URL | Production domain |
 |---|---|---|---|
@@ -11,10 +11,12 @@ Three independent Next.js websites share **one ASP.NET Core API** and **one Post
 | Super-admin website | `apps/super-admin-website` | http://localhost:3002 | *to be decided* (env-configured) |
 | API | `backend/BusinessDirectory.Api` | http://localhost:5080 | *to be decided* |
 
-**Status:** Schema `V0001`-`V0003` and the Hyderabad reference seeds exist. The main website has the home page,
-database-backed search (keyword, category, locality, proximity, sorting and paging), locality/category pages and
-listing pages (English only). Owner phone-OTP login and listing create/edit/submit work end to end. Admin and
-super-admin are still placeholders, so submitted listings cannot be approved yet.
+**Status:** Running on **SQL Server** (Azure SQL Database in production) since 2026-10-21; the PostgreSQL migrations are kept as history and never run. Schema `S0001`-`S0008` and the Hyderabad reference seeds exist. The public site has the home page,
+database-backed search (keyword, category, locality, proximity, sorting and paging), locality/category pages,
+listing pages with photos, reviews, enquiries and abuse reporting, and an XML sitemap (English only). Owners sign
+in by phone OTP and manage their listings, photos, enquiries and saved businesses. Administrators sign in with a
+password plus a mandatory authenticator and moderate listings, reviews and reports. The super-admin site manages
+staff accounts, roles and the audit log. Not built: notifications of any kind, subscriptions and payments.
 See `docs/PROJECT_STATUS.md` for the current state and the next step, and `docs/` for architecture and decisions.
 
 ## Prerequisites (Windows; see docs/local-development.md for details)
@@ -31,14 +33,13 @@ winget install Microsoft.VisualStudioCode
 
 ```powershell
 npm install                      # installs all three websites (npm workspaces)
-docker compose up -d             # PostgreSQL+PostGIS and the Azure Blob emulator (Azurite)
-
+docker compose up -d             # SQL Server and the Azure Blob emulator (Azurite)
 npm run db:migrate                                     # apply migrations + reference seeds (safe to re-run)
 npm run db:seed-dev                                    # optional: sample listings for local testing (Development only)
 dotnet run --project backend/BusinessDirectory.Api     # API on :5080   (terminal 1)
 npm run dev:main                                       # main site :3000 (terminal 2)
 npm run dev:admin                                      # admin :3001     (terminal 3, optional)
-npm run dev:super-admin                                # super-admin :3002 (terminal 4, optional)
+npm run dev:super-admin                                # super-admin :3002 (terminal 4)
 ```
 
 Optional: copy `.env.example` to `.env` to change local database credentials, and `apps/<app>/.env.example`
@@ -71,7 +72,14 @@ Database behaviour has its own checks. They insert, assert and roll back, so the
 re-run against a running local database:
 
 ```powershell
-Get-Content database/checks/search_smoke.sql | docker exec -i hl-postgres psql -U hl_dev -d hyderabad_links -v ON_ERROR_STOP=1
+Get-Content database/sqlserver/checks/constraints_smoke.sql | docker exec -i hl-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<MSSQL_SA_PASSWORD from .env>" -C -d hyderabad_links -b
+```
+
+The database has to exist before the first `npm run db:migrate` — Azure SQL creates databases with its
+own options, so the migration runner deliberately never creates one:
+
+```powershell
+docker exec -i hl-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<password>" -C -Q "IF DB_ID('hyderabad_links') IS NULL CREATE DATABASE hyderabad_links;"
 ```
 
 ## Repository layout

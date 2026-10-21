@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { MediaUploader } from "@/components/account/MediaUploader";
+import { MoveMediaButton } from "@/components/account/MoveMediaButton";
 import { RemoveMediaButton } from "@/components/account/RemoveMediaButton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { getListingMedia, getMyListing, type ListingMediaItem } from "@/lib/owner-api";
@@ -111,7 +112,7 @@ export default async function ListingPhotosPage({ params }: Props) {
 
             {own.length > 0 ? (
               <ul className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
-                {own.map((item) => (
+                {own.map((item, index) => (
                   <li key={item.id} className="rounded-xl border border-line bg-white p-3">
                     {item.kind === "video" ? (
                       <video src={item.url} controls preload="metadata" className="aspect-video w-full rounded-lg bg-black" />
@@ -128,8 +129,20 @@ export default async function ListingPhotosPage({ params }: Props) {
                         Hidden &mdash; over what your current plan allows.
                       </p>
                     ) : null}
-                    <div className="mt-2">
+                    <div className="mt-2 flex items-center justify-between gap-2">
                       <RemoveMediaButton listingId={id} mediaId={item.id} what={section.kind} />
+                      {/* Order is only worth changing when there is more than one of a kind. */}
+                      {own.length > 1 ? (
+                        <span className="flex gap-1">
+                          <MoveMediaButton listingId={id} mediaId={item.id} direction="up" disabled={index === 0} />
+                          <MoveMediaButton
+                            listingId={id}
+                            mediaId={item.id}
+                            direction="down"
+                            disabled={index === own.length - 1}
+                          />
+                        </span>
+                      ) : null}
                     </div>
                   </li>
                 ))}

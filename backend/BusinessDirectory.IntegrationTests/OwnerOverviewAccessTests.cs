@@ -22,7 +22,7 @@ public class OwnerOverviewAccessTests(WebApplicationFactory<Program> factory) : 
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        Assert.DoesNotContain("Npgsql", body);
+        Assert.DoesNotContain("SqlClient", body);
         Assert.DoesNotContain("SELECT", body);
     }
 }

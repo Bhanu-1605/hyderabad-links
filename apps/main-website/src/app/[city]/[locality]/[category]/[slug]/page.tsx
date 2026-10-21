@@ -4,10 +4,13 @@ import Link from "next/link";
 import { EnquiryForm } from "@/components/EnquiryForm";
 import { ReviewForm } from "@/components/ReviewForm";
 import { Reviews } from "@/components/Reviews";
+import { FavouriteButton } from "@/components/FavouriteButton";
 import { JsonLd } from "@/components/JsonLd";
 import { ListingGallery } from "@/components/ListingGallery";
+import { ReportListing } from "@/components/ReportListing";
 import { initialsOf } from "@/components/ui/BusinessCard";
 import { getListing, getReviews } from "@/lib/api";
+import { listFavourites } from "@/lib/owner-api";
 import { readTokens } from "@/lib/session";
 import { absoluteUrl, mapsHref, telHref, whatsappHref } from "@/lib/format";
 import type { ListingDetail } from "@/lib/types";
@@ -97,6 +100,14 @@ export default async function ListingPage({ params }: Props) {
   // redirect to sign-in when there is none - wrong behaviour on a public page.
   const [reviews, tokens] = await Promise.all([getReviews(city, locality, slug), readTokens()]);
   const signedIn = tokens.access !== null;
+
+  // Whether this visitor has already saved it. Only asked when signed in: with no session the
+  // owner helpers redirect to sign-in, which would be the wrong behaviour on a public page.
+  let saved = false;
+  if (signedIn) {
+    const favourites = await listFavourites();
+    saved = favourites.ok && favourites.data.some((item) => item.url === listing.url);
+  }
 
   // The category in the URL must be the listing's primary category, otherwise 301 to the canonical URL (decision D4).
   if (category !== listing.categorySlug) permanentRedirect(listing.url);
@@ -197,6 +208,14 @@ export default async function ListingPage({ params }: Props) {
           >
             Directions
           </a>
+          <FavouriteButton
+            city={city}
+            locality={locality}
+            slug={slug}
+            saved={saved}
+            signedIn={signedIn}
+            signInHref={`/login?next=${encodeURIComponent(`/${city}/${locality}/${category}/${slug}`)}`}
+          />
         </div>
 
         <dl className="mt-8 grid gap-3.5 sm:grid-cols-2">
@@ -250,6 +269,8 @@ export default async function ListingPage({ params }: Props) {
           More {listing.categoryName.toLowerCase()} in {listing.localityName}
         </Link>
       </p>
+
+      <ReportListing city={city} locality={locality} slug={slug} />
 
       <JsonLd
         data={{

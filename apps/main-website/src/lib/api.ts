@@ -6,6 +6,7 @@ import type {
   NearestLocality,
   SearchCriteria,
   SearchResults,
+  Sitemap,
 } from "./types";
 
 // Server-side only: the browser never calls the API directly (architecture principle 1).
@@ -145,6 +146,73 @@ export async function sendEnquiry(
 
   if (response.status === 404) {
     message = "This business is no longer taking enquiries.";
+  }
+
+  return { ok: false, message, fieldErrors };
+}
+
+/**
+ * Every page the sitemap should list. Returns null instead of throwing when the API is
+ * unreachable: a sitemap that is briefly short is better than one that answers 500.
+ */
+export async function getSitemap(): Promise<Sitemap | null> {
+  try {
+    return await getJson<Sitemap>("/api/v1/public/sitemap", 3600);
+  } catch {
+    return null;
+  }
+}
+
+/** The reasons the API accepts. Shown in the form so the two cannot drift apart. */
+export const REPORT_REASONS = [
+  { value: "not_a_real_business", label: "This is not a real business" },
+  { value: "wrong_details", label: "The details are wrong" },
+  { value: "closed_down", label: "It has closed down" },
+  { value: "offensive_content", label: "The content is offensive" },
+  { value: "spam", label: "It is spam" },
+  { value: "other", label: "Something else" },
+] as const;
+
+export type ReportResult = { ok: true } | { ok: false; message: string; fieldErrors: Record<string, string> };
+
+/**
+ * Reports a listing. Deliberately open to a visitor with no account: the people most likely to
+ * spot a fake listing are the customers it tried to catch. The API counts the limits.
+ */
+export async function reportListing(
+  target: { city: string; locality: string; slug: string },
+  input: { reason: string; details: string },
+): Promise<ReportResult> {
+  const path = [target.city, target.locality, target.slug].map(encodeURIComponent).join("/");
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/public/listings/${path}/reports`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ reason: input.reason, details: input.details.trim() === "" ? null : input.details.trim() }),
+      cache: "no-store",
+    });
+  } catch {
+    return { ok: false, message: "We could not reach the server. Please try again in a moment.", fieldErrors: {} };
+  }
+
+  if (response.ok) return { ok: true };
+
+  const fieldErrors: Record<string, string> = {};
+  let message = "We could not send your report. Please try again.";
+  try {
+    const body = (await response.json()) as { detail?: unknown; errors?: Record<string, unknown> };
+    if (body.errors && typeof body.errors === "object") {
+      for (const [field, messages] of Object.entries(body.errors)) {
+        if (Array.isArray(messages) && typeof messages[0] === "string") fieldErrors[field] = messages[0];
+      }
+      message = "Please fix the fields marked below.";
+    } else if (typeof body.detail === "string") {
+      message = body.detail;
+    }
+  } catch {
+    // Not JSON: keep the generic message.
   }
 
   return { ok: false, message, fieldErrors };

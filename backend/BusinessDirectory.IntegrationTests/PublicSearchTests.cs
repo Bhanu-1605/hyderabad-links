@@ -30,7 +30,7 @@ public class PublicSearchTests(WebApplicationFactory<Program> factory) : IClassF
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Contains("sort must be one of", body);
-        Assert.DoesNotContain("Npgsql", body);
+        Assert.DoesNotContain("SqlClient", body);
         Assert.DoesNotContain("SELECT", body);
     }
 }
