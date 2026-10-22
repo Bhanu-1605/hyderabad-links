@@ -11,8 +11,10 @@ import type {
 
 // Server-side only: the browser never calls the API directly (architecture principle 1).
 // API_BASE_URL is read at runtime, so one build works in staging and production.
-const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:5080";
-
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL ??
+  process.env.API_BASE_URL ??
+  "http://localhost:5080";
 async function getJson<T>(path: string, revalidateSeconds: number): Promise<T | null> {
   const response = await fetch(`${API_BASE_URL}${path}`, { next: { revalidate: revalidateSeconds } });
   if (response.status === 404) return null;

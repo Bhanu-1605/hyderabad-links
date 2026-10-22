@@ -3,8 +3,10 @@ import { ACCESS_COOKIE, REFRESH_COOKIE, accessCookieOptions, refreshCookieOption
 
 // Runs before every /account page. Owner access tokens last 15 minutes: when the access cookie is gone but the
 // refresh cookie is still there, swap it for a fresh pair here (the only place that can set cookies before render).
-const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:5080";
-
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL ??
+  process.env.API_BASE_URL ??
+  "http://localhost:5080";
 function toLogin(request: NextRequest): NextResponse {
   const url = new URL("/login", request.url);
   url.searchParams.set("next", request.nextUrl.pathname + request.nextUrl.search);
