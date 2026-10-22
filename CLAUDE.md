@@ -18,9 +18,9 @@ Three independent Next.js websites, one ASP.NET Core API, one SQL Server databas
   (`geography`), full-text search and a stored trigram table for typo tolerance (D42, D43).
   Migrations are forward-only SQL files under `database/sqlserver/migrations/`, applied by DbUp.
   `database/migrations/` holds the original **PostgreSQL** migrations as history: never run them.
-  The conversion from PostgreSQL is **done**: schema, seeds, driver and every query. What is not
-  yet converted is 11 of the 12 transactional checks in `database/checks/`, which are still
-  PL/pgSQL. `docs/PROJECT_STATUS.md` lists them.
+  The conversion from PostgreSQL is **done**: schema, seeds, driver, every query and every check.
+  `database/migrations`, `database/seeds` and `database/checks` are history only; each has a README
+  saying so. There is no PostgreSQL left in development, runtime, testing, CI or deployment.
 - **Infrastructure:** Azure App Service, Azure SQL Database, Blob Storage, Key Vault,
   Application Insights, GitHub Actions. No Kubernetes, Redis or message brokers without approval.
 
@@ -59,18 +59,35 @@ dotnet test backend/BusinessDirectory.sln
 ```
 
 Database behaviour is checked by the transactional scripts in `database/sqlserver/checks/` — they
-insert, assert and roll back, so they are safe to re-run:
+insert, assert and roll back, so they are safe to re-run. All thirteen at once:
 
 ```powershell
-Get-Content database/sqlserver/checks/constraints_smoke.sql | docker exec -i hl-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<the MSSQL_SA_PASSWORD from .env>" -C -d hyderabad_links -b
+npm run db:check
 ```
 
-That folder currently holds **one** check, `constraints_smoke`, which covers the constraints that had
-to be rewritten by hand (phone, slug and email shapes, the notification states, media dimensions),
-the trigram maintenance, and the append-only audit log. The other twelve checks are still in
-`database/checks/` in PL/pgSQL and have **not** been converted — see `docs/PROJECT_STATUS.md`.
+One of them, by any part of its name:
 
-Note the `-i` on `docker exec`: without it sqlcmd gets no stdin and the script silently does nothing.
+```powershell
+npm run db:check -- review
+```
+
+They need the container and the schema, so this is a local command, not a CI one. To run a file by
+hand instead:
+
+```powershell
+Get-Content database/sqlserver/checks/constraints_smoke.sql | docker exec -i hl-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<the MSSQL_SA_PASSWORD from .env>" -C -d hyderabad_links -b -I
+```
+
+Note the `-i` on `docker exec`: without it sqlcmd gets no stdin and the script silently does
+nothing, which looks exactly like a pass. `-I` turns on QUOTED_IDENTIFIER, which sqlcmd otherwise
+leaves off.
+
+Two things to know before adding a check. A **full-text index cannot see uncommitted rows**, so a
+`CONTAINSTABLE` assertion inside one of these transactions matches nothing — or matches a leftover
+committed row and passes for the wrong reason; full-text is asserted against committed rows in
+`v0002_smoke`. The **trigram table is ordinary rows** written by a trigger, so typo tolerance can be
+asserted inside the transaction, through `hl_similarity` against 0.3 (`pg_trgm`'s old threshold).
+Give each check a slug prefix of its own, so it does not depend on the dev database being pristine.
 
 The .NET integration tests deliberately need **no** database, because CI runs them without one.
 Anything that needs real rows belongs in `database/sqlserver/checks/`.

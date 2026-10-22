@@ -7,7 +7,7 @@ namespace BusinessDirectory.IntegrationTests;
 // Onboarding must never be reachable without a verified owner token, because it is what turns a
 // verified phone into an account. Like the other integration tests here, this needs no database.
 // The behaviour that needs real rows (one account per owner, idempotent repeats, concurrent
-// submits) is covered by database/checks/onboarding_smoke.sql.
+// submits) is covered by database/sqlserver/checks/onboarding_smoke.sql.
 public class OwnerOnboardingAccessTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private const string Onboarding = "/api/v1/me/onboarding";

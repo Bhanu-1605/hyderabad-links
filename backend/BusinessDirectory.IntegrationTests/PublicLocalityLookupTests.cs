@@ -6,7 +6,7 @@ namespace BusinessDirectory.IntegrationTests;
 // Request validation for the two locality lookup endpoints behind the location autocomplete.
 // Like the other integration tests here, these need no database: they prove the endpoints refuse
 // bad input before it reaches SQL. What the queries actually return is checked against real rows
-// by database/checks/locality_search_smoke.sql.
+// by database/sqlserver/checks/locality_search_smoke.sql.
 public class PublicLocalityLookupTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private const string Search = "/api/v1/public/localities/search";

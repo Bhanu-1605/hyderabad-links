@@ -1,0 +1,70 @@
+name: Deploy Hyderabad Links API to Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/main_hyderabad-links-api.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      - name: Restore dependencies
+        run: dotnet restore backend/BusinessDirectory.Api/BusinessDirectory.Api.csproj
+
+      - name: Build API
+        run: dotnet build backend/BusinessDirectory.Api/BusinessDirectory.Api.csproj --configuration Release --no-restore
+
+      - name: Publish API
+        run: dotnet publish backend/BusinessDirectory.Api/BusinessDirectory.Api.csproj --configuration Release --no-build --output ./publish
+
+      - name: Upload published API
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyderabad-links-api
+          path: ./publish/
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download published API
+        uses: actions/download-artifact@v4
+        with:
+          name: hyderabad-links-api
+          path: ./publish
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_E5D5718FBAD04E05BE4F036C996994CB }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_22F6CA0500A747D79984603235D990D9 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_61D6EDB0EE93466D95B128837A44F1E8 }}
+
+      - name: Deploy API to Azure
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: hyderabad-links-api
+          slot-name: Production
+          package: ./publish

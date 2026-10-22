@@ -68,11 +68,18 @@ npm run verify
 Runs: migration safety check, its self-tests, TypeScript checks, production builds of all three apps, the .NET build
 and the .NET tests.
 
-Database behaviour has its own checks. They insert, assert and roll back, so they leave no data and are safe to
-re-run against a running local database:
+Database behaviour has its own checks — thirteen of them, in `database/sqlserver/checks/`. They insert, assert and
+roll back, so they leave no data and are safe to re-run against a running local database. They need Docker and the
+schema, so they are not part of `npm run verify` and not part of CI:
 
 ```powershell
-Get-Content database/sqlserver/checks/constraints_smoke.sql | docker exec -i hl-sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "<MSSQL_SA_PASSWORD from .env>" -C -d hyderabad_links -b
+npm run db:check
+```
+
+One of them, by any part of its name:
+
+```powershell
+npm run db:check -- review
 ```
 
 The database has to exist before the first `npm run db:migrate` — Azure SQL creates databases with its

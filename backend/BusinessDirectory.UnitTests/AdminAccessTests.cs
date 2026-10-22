@@ -15,7 +15,7 @@ public class AdminPermissionsTests
     [Fact]
     public void Every_seeded_permission_belongs_to_exactly_one_surface()
     {
-        // Mirrors database/seeds/reference/R003_roles_permissions.sql. A new permission added to the seed
+        // Mirrors database/sqlserver/seeds/reference/R003_roles_permissions.sql. A new permission added to the seed
         // without being placed on a surface should fail here rather than be silently unreachable.
         string[] seeded =
         [

@@ -9,7 +9,7 @@ namespace BusinessDirectory.IntegrationTests;
 //
 // These run with no database, so only the authorization boundary is testable here. That one owner
 // never sees another's enquiries was verified against the running API with two real owners, and the
-// storage rules are in database/checks/enquiry_smoke.sql.
+// storage rules are in database/sqlserver/checks/enquiry_smoke.sql.
 public class EnquiryAccessTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client = factory.CreateClient();

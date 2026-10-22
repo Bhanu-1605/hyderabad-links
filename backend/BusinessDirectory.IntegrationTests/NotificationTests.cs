@@ -18,7 +18,7 @@ namespace BusinessDirectory.IntegrationTests;
 //
 // What is *not* here: that a real provider delivers anything. No provider is configured (decision
 // D14), so there is nothing to test and nothing is claimed. The storage rules are in
-// database/checks/notification_smoke.sql, and the console sender was exercised against the running
+// database/sqlserver/checks/notification_smoke.sql, and the console sender was exercised against the running
 // API with a real enquiry — see docs/PROJECT_STATUS.md.
 public class NotificationTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {

@@ -9,7 +9,7 @@ namespace BusinessDirectory.IntegrationTests;
 // Access control and request validation for the admin surface. Nothing here reaches the database:
 // every assertion is about a request that must be refused before any SQL runs, which is why these
 // tests pass in CI, where no database exists. SQL behaviour is checked by
-// database/checks/admin_moderation_smoke.sql instead.
+// database/sqlserver/checks/admin_moderation_smoke.sql instead.
 public class AdminModerationAccessTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _factory = factory;
